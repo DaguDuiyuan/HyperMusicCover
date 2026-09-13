@@ -92,6 +92,53 @@ public class WallpaperProbe {
      */
     private static volatile Object sKeyguardEngine;
 
+    /** Renderer class names already reported by the diagnostic above; one line each. */
+    private static final java.util.Set<String> sUploadNames =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /** Engine class names seen at construction; one line each. Diagnostic. */
+    private static final java.util.Set<String> sEngineNames =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /**
+     * The desktop wallpaper's engine, captured so its texture can be re-uploaded.
+     *
+     * Not ours to leave swapped: a failure that strands this one shows the album cover on the
+     * user's home screen, so anything that sets it has to have a path that puts it back.
+     */
+    private static volatile Object sDesktopEngine;
+
+    /**
+     * The shade is up, so the DESKTOP wallpaper should be showing the cover.
+     *
+     * Why the desktop wallpaper at all: the notification shade's glass samples what is BEHIND
+     * its window, and the cover SystemUI draws is inside it - so nothing we draw there can ever
+     * be what the cards blur. The lock screen solved the same problem the same way, by having
+     * the picture where the glass looks. This is that, for the desktop.
+     */
+    private static volatile boolean sShadeOn;
+
+    /** When the last shade-state message arrived, so a lost one cannot strand the wallpaper. */
+    private static volatile long sShadeAt;
+
+    /** The composed cover, fitted to the desktop texture, and the size it was fitted for. */
+    private static volatile Bitmap sShadeFitted;
+    private static volatile String sShadeFitOf;
+
+    /**
+     * How long the desktop stays swapped without being told again.
+     *
+     * The message that ends it is a broadcast, and a broadcast has no delivery guarantee. This is
+     * the only thing standing between a lost one and the user's home screen showing an album
+     * cover indefinitely, so it exists, and it is generous enough that an ordinary pull-down -
+     * which is seconds long - is refreshed many times over.
+     *
+     * The cost of expiring early is small by construction: SystemUI draws the cover inside the
+     * shade window as well, so the background still looks right; only the glass goes back to
+     * sampling the real wallpaper.
+     */
+    private static final long SHADE_TTL_MS = 10000L;
+
     private static final String CLS_KEYGUARD_ENGINE =
             "com.miui.miwallpaper.wallpaperservice.impl.keyguard.KeyguardImageEngineImpl";
 
@@ -246,6 +293,24 @@ public class WallpaperProbe {
             Xp.hookAllLambdas(base, "lambda$onSurfaceCreated$0", chain -> {
                 Object[] args = chain.getArgs().toArray();
                 boolean keyguard = chain.getThisObject().getClass().getName().contains("Keyguard");
+                // Temporary diagnostic: name every renderer that reaches the upload, so the
+                // DESKTOP one can be addressed by name. It shares this code path and is let
+                // through below - nothing here changes for it.
+                if (!keyguard && sUploadNames.add(chain.getThisObject().getClass().getName())) {
+                    Xp.log(TAG + "non-keyguard upload renderer: "
+                            + chain.getThisObject().getClass().getName());
+                }
+                // The desktop wallpaper, while the notification shade is over it. Same
+                // substitution the keyguard does below, on the sibling renderer, for the sibling
+                // reason: the cards' glass samples what is behind the shade window, so the cover
+                // has to BE the wallpaper for it to be what they show.
+                if (!keyguard && args.length > 0 && args[0] instanceof Bitmap) {
+                    Bitmap cover = shadeCoverFor((Bitmap) args[0]);
+                    if (cover != null) {
+                        args[0] = cover;
+                        return chain.proceed(args);
+                    }
+                }
                 if (keyguard && args.length > 0 && args[0] instanceof Bitmap) {
                     Bitmap orig = (Bitmap) args[0];
                     if (sKeyguardTexture == null) {
@@ -404,6 +469,33 @@ public class WallpaperProbe {
             Xp.log(TAG + "keyguard engine hooked");
         } catch (Throwable t) {
             Xp.log(TAG + "keyguard engine hook failed: " + t);
+        }
+
+        // The DESKTOP engine, found without knowing its name.
+        //
+        // The two engines are siblings - the renderers are (`Keyguard`/`Desktop` +
+        // `AnimImageWallpaperRenderer`, both under container.openGL) and the reload mechanism
+        // that drives them is shared, which is why reloadTexture()'s obfuscated u()/b/T(false)
+        // work at all. So hooking the SUPERCLASS of the keyguard engine catches every sibling's
+        // construction too, and the class name of each instance tells us which is which. The
+        // name is not guessed anywhere in this file; it is read off the instances.
+        try {
+            Class<?> kg = Xp.findClass(CLS_KEYGUARD_ENGINE, sCl);
+            Class<?> base = kg.getSuperclass();
+            Xp.log(TAG + "engine base class = " + (base == null ? "null" : base.getName()));
+            if (base != null) {
+                Xp.hookAllConstructors(base, chain -> {
+                    Object result = chain.proceed();
+                    Object self = chain.getThisObject();
+                    String n = self.getClass().getName();
+                    if (sEngineNames.add(n)) Xp.log(TAG + "engine instance: " + n);
+                    if (n.contains("Desktop")) sDesktopEngine = self;
+                    return result;
+                });
+                Xp.log(TAG + "engine base constructors hooked");
+            }
+        } catch (Throwable t) {
+            Xp.log(TAG + "engine base hook failed: " + t);
         }
 
         // The video wallpaper's engine, which is what a live lock wallpaper gets instead of
@@ -926,6 +1018,20 @@ public class WallpaperProbe {
                             }
                         }
                         if (reload) reloadTexture();
+                    } else if ("shadeart".equals(op)) {
+                        // The notification shade went up or came down. Swapping the DESKTOP
+                        // texture is what puts the cover where the cards' glass samples, which is
+                        // the only way it can ever be what they blur.
+                        boolean on = i.getBooleanExtra("on", false);
+                        // Refreshed on every message, including repeats: the repeats are the
+                        // heartbeat that keeps the TTL from expiring under an open shade.
+                        if (on) sShadeAt = android.os.SystemClock.uptimeMillis();
+                        if (on != sShadeOn) {
+                            sShadeOn = on;
+                            Xp.log(TAG + "shade art " + (on ? "ON - desktop wallpaper is the cover"
+                                    : "off - desktop wallpaper back to its own picture"));
+                            reloadDesktopTexture();
+                        }
                     } else if ("reload".equals(op)) {
                         reloadTexture();
                     } else if ("fadems".equals(op)) {
@@ -995,6 +1101,62 @@ public class WallpaperProbe {
      * texture kept the album art. Leaving cover mode then put the depth layer back but not the
      * wallpaper, so the lock screen read as the cover stuck behind the subject. See Handoff 27.
      */
+    /**
+     * The cover the desktop wallpaper should be showing, fitted to the texture it is about to be
+     * uploaded in place of.
+     *
+     * Fitted to the ORIGINAL's dimensions rather than to the screen's, because that is the rule
+     * the keyguard side learned the hard way: updateDimensions/updateMatrix derive the GL matrix
+     * from the bitmap's size, so anything that is not exactly this texture lands the wallpaper
+     * askew - a corner of the picture in a corner of the screen.
+     *
+     * Returns null for "leave it alone", which is every case except an open shade with art.
+     */
+    private static Bitmap shadeCoverFor(Bitmap orig) {
+        if (!sShadeOn) return null;
+        if (android.os.SystemClock.uptimeMillis() - sShadeAt > SHADE_TTL_MS) {
+            // Nothing has refreshed this, so the shade is not up any more and the message that
+            // would have said so never arrived. Put the desktop back.
+            sShadeOn = false;
+            Xp.log(TAG + "shade art expired with no word - desktop wallpaper back to its own");
+            return null;
+        }
+        Bitmap art = sArt;
+        if (art == null || art.isRecycled() || orig == null) return null;
+        final int w = orig.getWidth(), h = orig.getHeight();
+        if (w <= 0 || h <= 0) return null;
+        if (art.getWidth() == w && art.getHeight() == h) return art;
+        final String key = w + "x" + h;
+        Bitmap fitted = sShadeFitted;
+        if (fitted != null && !fitted.isRecycled() && key.equals(sShadeFitOf)) return fitted;
+        try {
+            fitted = Bitmap.createScaledBitmap(art, w, h, true);
+        } catch (Throwable t) {
+            Xp.log(TAG + "shade art could not be fitted to " + key + ": " + t);
+            return null;
+        }
+        final Bitmap old = sShadeFitted;
+        sShadeFitted = fitted;
+        sShadeFitOf = key;
+        if (old != null && old != fitted && !old.isRecycled()) old.recycle();
+        return fitted;
+    }
+
+    /**
+     * Re-runs the DESKTOP renderer's own surface-created path, the same way reloadTexture() does
+     * for the keyguard: the engine's pending-surface flag plus its own frame request, so the OEM
+     * does the upload rather than us touching GL.
+     */
+    private static void reloadDesktopTexture() {
+        Object eng = sDesktopEngine;
+        if (eng == null) {
+            Xp.log(TAG + "reload: no desktop engine captured - the desktop wallpaper cannot be "
+                    + "swapped, so the cards' glass will keep showing the wallpaper");
+            return;
+        }
+        reloadEngine(eng);
+    }
+
     private static void reloadTexture() {
         Object eng = sKeyguardEngine;
         if (eng == null) {
@@ -1002,6 +1164,11 @@ public class WallpaperProbe {
                     + "still the same image as the desktop one?)");
             return;
         }
+        reloadEngine(eng);
+    }
+
+    private static void reloadEngine(Object eng) {
+        if (eng == null) return;
         try {
             Xp.callMethod(eng, "u");
         } catch (Throwable t) {

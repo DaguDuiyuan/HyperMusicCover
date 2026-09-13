@@ -128,4 +128,47 @@
     <string name="restart_scope">重启全部作用域</string>
     <string name="check_update">检查更新</string>
     <string name="check_update_summary">在应用启动后自动检查是否有最新版</string>
+
+    <!-- The features page is a list of cards, each opening a page of its own. -->
+    <string name="features_cover_title">锁屏音乐封面</string>
+    <string name="features_cover_summary">封面、时钟、媒体卡片</string>
+    <string name="features_shade_title">通知中心</string>
+    <string name="features_shade_summary">下拉通知栏时的封面背景与手感</string>
+
+    <string name="shade_section_behaviour">行为</string>
+    <string name="shade_mode">生效范围</string>
+    <string name="shade_mode_summary">没在放音乐时下拉会怎样</string>
+    <string name="shade_mode_cover">只在音乐封面模式</string>
+    <string name="shade_mode_always">一直生效，没音乐时露出壁纸</string>
+    <string name="shade_mode_feel">一直生效，只接管手感</string>
+    <string name="shade_gate">下拉时延迟显示通知</string>
+    <string name="shade_gate_summary">刚开始拉时通知完全不显示，拉过一成再浮出</string>
+    <string name="shade_cardblur">通知卡片毛玻璃采样封面</string>
+    <string name="shade_cardblur_summary">关闭时卡片采样的是后面的应用</string>
+    <string name="shade_cardradius">卡片毛玻璃半径</string>
+    <string name="shade_touch">封面边缘跟手指</string>
+    <string name="shade_touch_summary">关闭则由通知面板带动（面板比手指快约九倍）</string>
+
+    <string name="shade_section_spring">弹簧手感</string>
+    <string name="shade_stiffness">模糊弹簧刚度</string>
+    <string name="shade_stiffness_summary">越小越「拖」</string>
+    <string name="shade_damping">模糊弹簧阻尼</string>
+    <string name="shade_damping_summary">1.00 为临界阻尼</string>
+    <string name="shade_curtainstiffness">收尾弹簧刚度</string>
+    <string name="shade_curtainstiffness_summary">松手后封面归位的快慢</string>
+    <string name="shade_curtaindamping">收尾弹簧阻尼</string>
+    <string name="shade_blursat">模糊饱和点</string>
+    <string name="shade_blursat_summary">拉到多少就完全模糊</string>
+
+    <string name="shade_section_curtain">窗帘与封面</string>
+    <string name="shade_deadzone">起始死区</string>
+    <string name="shade_deadzone_summary">这段行程内封面完全不显示</string>
+    <string name="shade_alphaend">封面淡入终点</string>
+    <string name="shade_alphaend_summary">拉到多少封面完全不透明</string>
+    <string name="shade_wprise">封面起始下沉</string>
+    <string name="shade_wprise_summary">起始时封面比最终位置高多少</string>
+    <string name="shade_wpblur">封面自身模糊</string>
+    <string name="shade_wpblur_summary">看不清时封面的模糊半径</string>
+    <string name="shade_sharpstart">封面变清晰起点</string>
+    <string name="shade_sharpstart_summary">拉到多少开始由糊变清，1000 为全程保持模糊</string>
 </resources>

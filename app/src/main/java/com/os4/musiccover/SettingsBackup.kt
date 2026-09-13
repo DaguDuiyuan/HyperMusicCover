@@ -29,6 +29,8 @@ object SettingsBackup {
     private const val KEY_CARD_TITLE_TAP = "cardTitleTap"
     private const val KEY_HIDE_FINGERPRINT = "hideFingerprint"
     private const val KEY_FP_AVOID = "fingerprintAvoid"
+    /** The whole notification-shade page, as one object keyed the way the module names them. */
+    private const val KEY_SHADE = "shade"
 
     suspend fun export(context: Context): String {
         val json = JSONObject(AppSettings.load(context).toJson())
@@ -45,6 +47,11 @@ object SettingsBackup {
             json.put(KEY_CARD_TITLE_TAP, module.mcTitleTap)
             json.put(KEY_HIDE_FINGERPRINT, module.hideFingerprint)
             json.put(KEY_FP_AVOID, module.fpAvoid)
+            // Written whole rather than key by key, because the map is built from the module's
+            // own list of keys - this file has no idea what is in it, which is the point.
+            if (module.shade.isNotEmpty()) {
+                json.put(KEY_SHADE, JSONObject(module.shade as Map<*, *>))
+            }
         }
         return json.toString(2)
     }
@@ -84,6 +91,16 @@ object SettingsBackup {
             }
             if (obj.has(KEY_FP_AVOID)) {
                 ModuleBridge.setFingerprintAvoid(context, obj.getInt(KEY_FP_AVOID))
+            }
+            // EVERY key in the object, not a chosen few. A restore that puts back some of the
+            // shade page and leaves the rest at whatever this device happened to have is worse
+            // than one that puts back none of it: the result is a combination nobody chose and
+            // nothing on screen says so.
+            if (obj.has(KEY_SHADE)) {
+                val shade = obj.getJSONObject(KEY_SHADE)
+                for (key in shade.keys()) {
+                    ModuleBridge.setShade(context, key, shade.getInt(key))
+                }
             }
         } catch (_: Exception) {
             // The app half is already applied; a malformed module half is not worth losing it over.

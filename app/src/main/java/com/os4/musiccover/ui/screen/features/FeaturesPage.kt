@@ -1,22 +1,12 @@
 package com.os4.musiccover.ui.screen.features
 
+import android.content.Intent
 import android.graphics.Bitmap
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.add
-import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,9 +14,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
@@ -34,20 +22,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
+import com.os4.musiccover.CoverActivity
 import com.os4.musiccover.ModuleBridge
 import com.os4.musiccover.R
-import com.os4.musiccover.ui.util.BlurredBar
-import com.os4.musiccover.ui.util.pageScrollModifiers
-import com.os4.musiccover.ui.util.rememberBlurBackdrop
+import com.os4.musiccover.ShadeActivity
+import com.os4.musiccover.ui.util.PageScaffold
+import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
-import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.TabRow
-import top.yukonga.miuix.kmp.basic.TopAppBar
-import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -55,7 +40,79 @@ import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
 
 /**
- * Everything the module itself can be told to do, with a picture of the lock screen above it.
+ * The features tab: a card per feature, each opening a screen of its own.
+ *
+ * The tab lists rather than controls because its two subjects have nothing to do with each
+ * other - one is what the lock screen shows, the other is what happens over the desktop - and
+ * between them they are long enough that the second would have been buried under the first.
+ *
+ * Each card starts an Activity, which is what `AboutPage` does to reach the licence list and
+ * what `LicenseActivity` therefore already established as the house pattern for a sub-screen.
+ * The transition, the back gesture and the predictive-back animation on Android 13+ are the
+ * platform's; a sub-page swapped in place here would have had to imitate all three.
+ */
+@Composable
+fun FeaturesPageView(
+    isBlurEnabled: Boolean,
+    refreshKey: Int,
+    extraBottomPadding: Dp = 0.dp,
+) {
+    val context = LocalContext.current
+    FeatureList(isBlurEnabled, extraBottomPadding) { target ->
+        // An Activity, not a page swapped in place - the same thing AboutPage does to reach the
+        // licence list, and the reason is the transition: a whole screen arriving is the
+        // platform's own animation, it brings its own back handling, and nothing here has to
+        // imitate any of it. A sub-page animated inside this one only ever approximates that.
+        context.startActivity(Intent(context, target))
+    }
+}
+
+/**
+ * The tab itself: one card per feature, each opening a screen of its own.
+ *
+ * This used to BE the lock screen page. It became a list when the notification shade arrived,
+ * because the two have nothing to do with each other - one is what the lock screen shows, the
+ * other is what happens over the desktop - and between them they are long enough that the second
+ * would have been buried under the first.
+ */
+@Composable
+private fun FeatureList(
+    isBlurEnabled: Boolean,
+    extraBottomPadding: Dp,
+    onOpen: (Class<*>) -> Unit,
+) {
+    PageScaffold(
+        title = stringResource(R.string.tab_features),
+        isBlurEnabled = isBlurEnabled,
+        extraBottomPadding = extraBottomPadding,
+    ) {
+        item {
+            Column {
+                Card(
+                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)
+                ) {
+                    ArrowPreference(
+                        title = stringResource(R.string.features_cover_title),
+                        summary = stringResource(R.string.features_cover_summary),
+                        onClick = { onOpen(CoverActivity::class.java) },
+                    )
+                }
+                Card(
+                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)
+                ) {
+                    ArrowPreference(
+                        title = stringResource(R.string.features_shade_title),
+                        summary = stringResource(R.string.features_shade_summary),
+                        onClick = { onOpen(ShadeActivity::class.java) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Everything the module can be told about the lock screen, with a picture of it above.
  *
  * These are not app preferences: each one is a command to the hook inside SystemUI, and the
  * values shown are the ones it reports back. The preview is drawn from the same values, so a
@@ -77,16 +134,13 @@ import top.yukonga.miuix.kmp.basic.Text as MiuixText
  * cover mode renders wrong - so the module does both on its own.
  */
 @Composable
-fun FeaturesPageView(
+internal fun CoverPageView(
     isBlurEnabled: Boolean,
     refreshKey: Int,
     extraBottomPadding: Dp = 0.dp,
+    onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val scrollBehavior = MiuixScrollBehavior()
-    val backdrop = rememberBlurBackdrop()
-    val blurActive = isBlurEnabled && backdrop != null
-    val barColor = if (blurActive) Color.Transparent else MiuixTheme.colorScheme.surface
 
     var module by remember { mutableStateOf(ModuleBridge.State()) }
     var art by remember { mutableStateOf<Bitmap?>(null) }
@@ -165,75 +219,48 @@ fun FeaturesPageView(
         stringResource(R.string.card_section),
     )
 
-    Scaffold(
-        popupHost = { },
-        topBar = {
-            BlurredBar(backdrop, blurActive, scrollBehavior) {
-                TopAppBar(
-                    title = stringResource(R.string.tab_features),
-                    color = barColor,
-                    scrollBehavior = scrollBehavior,
-                )
-            }
+    PageScaffold(
+        title = stringResource(R.string.features_cover_title),
+        isBlurEnabled = isBlurEnabled,
+        extraBottomPadding = extraBottomPadding,
+        onBack = onBack,
+        pinned = {
+            Spacer(Modifier.height(24.dp))
+            LockPreview(
+                art = art,
+                bias = module.bias,
+                clockHeightDp = module.clockHeightDp,
+                glassEnd = module.glassEnd,
+                geometry = module.geometry,
+                card = shots.card,
+                cardRadius = shots.cardRadius,
+                artSlot = shots.artSlot,
+                cardHideArt = module.mcHideArt,
+                cardCenterText = module.mcCenterText,
+                clockHour = shots.clockHour,
+                clockMinute = shots.clockMinute,
+                date = shots.date,
+                leftShortcut = shots.left,
+                rightShortcut = shots.right,
+            )
+            Spacer(Modifier.height(12.dp))
+            TabRow(
+                tabs = groups,
+                selectedTabIndex = group,
+                onTabSelected = { group = it },
+                modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp),
+            )
         },
-        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
-            .only(WindowInsetsSides.Horizontal),
-    ) { innerPadding ->
-        Box(modifier = if (blurActive) Modifier.layerBackdrop(backdrop) else Modifier) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = innerPadding.calculateTopPadding()),
-                horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        item {
+            Card(
+                modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)
             ) {
-                Spacer(Modifier.height(24.dp))
-                LockPreview(
-                    art = art,
-                    bias = module.bias,
-                    clockHeightDp = module.clockHeightDp,
-                    glassEnd = module.glassEnd,
-                    geometry = module.geometry,
-                    card = shots.card,
-                    cardRadius = shots.cardRadius,
-                    artSlot = shots.artSlot,
-                    cardHideArt = module.mcHideArt,
-                    cardCenterText = module.mcCenterText,
-                    clockHour = shots.clockHour,
-                    clockMinute = shots.clockMinute,
-                    date = shots.date,
-                    leftShortcut = shots.left,
-                    rightShortcut = shots.right,
-                )
-                Spacer(Modifier.height(12.dp))
-                TabRow(
-                    tabs = groups,
-                    selectedTabIndex = group,
-                    onTabSelected = { group = it },
-                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp),
-                )
-                LazyColumn(
-                    overscrollEffect = null,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pageScrollModifiers(
-                            showTopAppBar = true,
-                            topAppBarScrollBehavior = scrollBehavior,
-                        ),
-                    contentPadding = PaddingValues(
-                        bottom = innerPadding.calculateBottomPadding() + extraBottomPadding,
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    item {
-                        Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                            when (group) {
-                                0 -> CoverGroup(enabled, module) { module = it }
-                                1 -> ClockGroup(enabled, module) { module = it }
-                                else -> CardGroup(enabled, module, { module = it }) {
-                                    shotNonce++
-                                }
-                            }
-                        }
+                when (group) {
+                    0 -> CoverGroup(enabled, module) { module = it }
+                    1 -> ClockGroup(enabled, module) { module = it }
+                    else -> CardGroup(enabled, module, { module = it }) {
+                        shotNonce++
                     }
                 }
             }
@@ -422,11 +449,6 @@ private fun CardGroup(
     }
 }
 
-/**
- * A slider with its current value printed opposite the title. Without the number there is no way
- * to tell where you have dragged to, which matters here because these values get compared against
- * ones written down in the notes.
- */
 /** The collapsed clock's height in dp, matching DEFAULT_CLOCK_HEIGHT_DP in the module. */
 private const val CLOCK_HEIGHT_MIN_DP = 20f
 /**
@@ -444,8 +466,17 @@ private const val CLOCK_HEIGHT_MAX_DP = 64f
 private const val CLOCK_RESPONSE_MIN = 0.18f
 private const val CLOCK_RESPONSE_MAX = 0.60f
 
+/**
+ * A slider with its current value printed opposite the title. Without the number there is no way
+ * to tell where you have dragged to, which matters here because these values get compared against
+ * ones written down in the notes.
+ *
+ * Shared with ShadePage, which is why it is `internal` rather than private to this file: both
+ * pages adjust module settings the same way, and a second slider that looked almost the same was
+ * the first thing a reviewer noticed.
+ */
 @Composable
-private fun ValueSlider(
+internal fun ValueSlider(
     title: String,
     summary: String?,
     value: Float,

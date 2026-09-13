@@ -61,6 +61,21 @@
             android:label="@string/third_party_licenses_title"
             android:theme="@style/Theme.HyperMusicCover" />
 
+        <!-- The features tab's two sub-screens, declared exactly like the licence list above:
+             an Activity each, so the platform supplies the transition and the back handling
+             rather than the features page imitating both. -->
+        <activity
+            android:name=".CoverActivity"
+            android:exported="false"
+            android:label="@string/features_cover_title"
+            android:theme="@style/Theme.HyperMusicCover" />
+
+        <activity
+            android:name=".ShadeActivity"
+            android:exported="false"
+            android:label="@string/features_shade_title"
+            android:theme="@style/Theme.HyperMusicCover" />
+
         <!--
             The module declares itself through META-INF/xposed/ now (java_init.list, module.prop,
             scope.list), which is how API 102 does it. These stay so a manager still lists the app

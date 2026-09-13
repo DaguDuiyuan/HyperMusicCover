@@ -73,6 +73,16 @@ object ModuleBridge {
         val hideFingerprint: Boolean = false,
         /** 0 system default, 1 never avoid the fingerprint icon, 2 always avoid it. */
         val fpAvoid: Int = 0,
+        /**
+         * The notification-shade settings, keyed exactly as the module's own CFG_KEYS.
+         *
+         * Read out of the reply by PREFIX rather than field by field. The module generates its
+         * half of this from one list - the same list its state file and its query reply are
+         * built from - so enumerating the bundle here means a knob added on that side appears in
+         * this map with nothing to change in this file. What the page does with each key is a
+         * table in the UI; what it means is the module's business.
+         */
+        val shade: Map<String, Int> = emptyMap(),
         val geometry: Geometry = Geometry(),
     ) {
         /** "Artist - Title" out of the module's packageName|song|artist key. */
@@ -165,6 +175,21 @@ object ModuleBridge {
 
     fun setFingerprintAvoid(context: Context, mode: Int) =
         send(context, "fpavoid") { putExtra("mode", mode) }
+
+    /**
+     * One shade setting, by the module's own key.
+     *
+     * A single op for the whole page rather than one per knob. There are a dozen of them, every
+     * one an int with a range, and a dozen near-identical ops would be a dozen chances for this
+     * side and the module to drift. The key is matched and the value clamped inside
+     * ShadeLayer.configure, so the settings page and an adb shell go through the same door and
+     * a value typed at a shell cannot drive the spring somewhere the UI would not.
+     */
+    fun setShade(context: Context, key: String, value: Int) =
+        send(context, "shadecfg") {
+            putExtra("key", key)
+            putExtra("v", value)
+        }
 
     /**
      * Asks the module for everything at once. Returns a dead State rather than throwing when the
@@ -360,6 +385,9 @@ object ModuleBridge {
             mcTitleTap = b.getBoolean("mctap", false),
             hideFingerprint = b.getBoolean("hidefp", false),
             fpAvoid = b.getInt("fpavoid", 0),
+            shade = b.keySet()
+                .filter { it.startsWith("shade_") }
+                .associate { it.removePrefix("shade_") to b.getInt(it, 0) },
             geometry = Geometry(
                 screenW = b.getInt("sw", 0),
                 screenH = b.getInt("sh", 0),
