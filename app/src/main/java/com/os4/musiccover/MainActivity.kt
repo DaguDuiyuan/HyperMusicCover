@@ -317,7 +317,10 @@ private fun MainScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(Modifier.layerBackdrop(backdrop))
+                // Gated on the setting, not just on the bar that samples it. Recording a layer
+                // is a second render of everything inside it, and with blur off nothing was
+                // reading this one - the bar had already switched to its opaque colour.
+                .then(if (isBlurEnabled) Modifier.layerBackdrop(backdrop) else Modifier)
                 .background(surfaceColor)
         ) {
             HorizontalPager(

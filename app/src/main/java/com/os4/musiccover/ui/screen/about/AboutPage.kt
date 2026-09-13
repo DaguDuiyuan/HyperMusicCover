@@ -145,6 +145,7 @@ fun AboutPageContent(
                 lazyListState = lazyListState,
                 scrollProgressProvider = { scrollProgress },
                 openLicensePage = openLicensePage,
+                isBlurEnabled = isBlurEnabled,
                 update = update,
             )
         }
@@ -160,10 +161,16 @@ private fun AboutContent(
     lazyListState: LazyListState,
     scrollProgressProvider: () -> Float,
     openLicensePage: () -> Unit,
+    isBlurEnabled: Boolean,
     update: UpdateController,
 ) {
     val uriHandler = LocalUriHandler.current
-    val contentBackdrop = rememberBlurBackdrop()
+    // `rememberBlurBackdrop` answers "can this device blur", not "did the user ask for it": on
+    // Android 13 and up it hands back a backdrop whatever the setting says. The gate has to be
+    // here. Everything below reads `contentBackdrop != null`, so with the setting off the layer
+    // was still recorded and the four textureBlur passes still ran - the page kept paying for a
+    // feature whose switch was off, and the switch was a lie.
+    val contentBackdrop = rememberBlurBackdrop()?.takeIf { isBlurEnabled }
     var blurRadius by remember { mutableFloatStateOf(60f) }
     var noiseCoefficient by remember { mutableFloatStateOf(BlurDefaults.NoiseCoefficient) }
     var brightness by remember { mutableFloatStateOf(0f) }
