@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.os4.musiccover.BuildConfig
 import com.os4.musiccover.ModuleBridge
 import com.os4.musiccover.R
 import com.os4.musiccover.ui.component.DropdownItem
@@ -69,7 +70,7 @@ import top.yukonga.miuix.kmp.basic.Text as MiuixText
 @Composable
 fun HomePageView(
     isBlurEnabled: Boolean,
-    refreshKey: Int,
+    isCurrent: () -> Boolean,
     extraBottomPadding: Dp = 0.dp,
 ) {
     val context = LocalContext.current
@@ -77,20 +78,27 @@ fun HomePageView(
     val scrollBehavior = MiuixScrollBehavior()
     val title = stringResource(R.string.tab_home)
 
-    val deviceModel = Build.MODEL.ifEmpty { stringResource(R.string.home_unknown) }
-    val deviceName = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
-        ?: deviceModel
-    val systemVersion = "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
+    // These used to run on every re-composition, and two of them are not reads of this process:
+    // `Settings.Global` is a ContentProvider call into system_server and `getPackageInfo` was a
+    // PackageManager call into it as well. None of the answers can change while the app is up, so
+    // each is asked for once.
+    val unknown = stringResource(R.string.home_unknown)
+    val deviceModel = remember(unknown) { Build.MODEL.ifEmpty { unknown } }
+    val deviceName = remember(context, deviceModel) {
+        Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
+            ?: deviceModel
+    }
+    val systemVersion = remember {
+        "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
+    }
     val loadingText = stringResource(R.string.home_loading)
     var hyperOSVersion by remember { mutableStateOf(loadingText) }
     LaunchedEffect(Unit) {
         hyperOSVersion = withContext(Dispatchers.IO) { SystemVersion.hyperOs(loadingText) }
     }
-    val moduleVersion = "v" + try {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "0.0.1"
-    } catch (_: Exception) {
-        "0.0.1"
-    }
+    // BuildConfig rather than the installed package's metadata: it is the same string for this
+    // build and it costs nothing, where the package manager had to be asked every time.
+    val moduleVersion = "v" + BuildConfig.VERSION_NAME
 
     var state by remember { mutableStateOf(ModuleBridge.State()) }
     var checked by remember { mutableStateOf(false) }
@@ -102,8 +110,11 @@ fun HomePageView(
     }
 
     // The module can be enabled, disabled or restarted behind the app's back, so ask again every
-    // time this page comes to the front rather than caching the answer from launch.
-    LaunchedEffect(refreshKey) { refresh() }
+    // time this page comes to the front rather than caching the answer from launch. Keyed on the
+    // answer rather than on the pager: while this page is not the one on screen the effect is
+    // simply not running, so swiping past it does not cost a query into SystemUI.
+    val current = isCurrent()
+    LaunchedEffect(current) { if (current) refresh() }
 
     PageScaffold(
         title = title,

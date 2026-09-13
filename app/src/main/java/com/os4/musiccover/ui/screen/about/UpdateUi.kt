@@ -152,7 +152,7 @@ class UpdateController internal constructor(internal val states: UpdateStates) {
  * and the install outlives the composition that started it.
  */
 @Composable
-fun rememberUpdateController(refreshKey: Int, checkUpdate: Boolean): UpdateController {
+fun rememberUpdateController(isCurrent: () -> Boolean, checkUpdate: Boolean): UpdateController {
     val context = LocalContext.current
     // LocalResources, not context.getString: the latter is not configuration-aware, and lint
     // fails the build on it (LocalContextGetResourceValueCall).
@@ -171,7 +171,13 @@ fun rememberUpdateController(refreshKey: Int, checkUpdate: Boolean): UpdateContr
     // The app already checked when it started; this picks that answer up, and re-asks only if it
     // has since gone stale - opening the page is the moment a stale answer is worth refreshing,
     // and the interval above is what keeps that from being a request per visit.
-    LaunchedEffect(refreshKey, allowed) {
+    //
+    // Keyed on whether this page is the one on screen, not on a counter the tab bar bumps: the
+    // counter made every page's effects restart on every tab change, so passing through to About
+    // was enough to send this one. It only runs while the page is actually in front now.
+    val current = isCurrent()
+    LaunchedEffect(current, allowed) {
+        if (!current) return@LaunchedEffect
         states.update = UpdateCheck.result
         if (!allowed) return@LaunchedEffect
         UpdateCheck.refresh(context)

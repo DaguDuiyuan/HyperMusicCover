@@ -54,7 +54,6 @@ import top.yukonga.miuix.kmp.basic.Text as MiuixText
 @Composable
 fun FeaturesPageView(
     isBlurEnabled: Boolean,
-    refreshKey: Int,
     extraBottomPadding: Dp = 0.dp,
 ) {
     val context = LocalContext.current
