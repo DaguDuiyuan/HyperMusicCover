@@ -1127,36 +1127,60 @@ public class Main extends XposedModule {
         // first two attempts at this in the module this is ported from. The row has to be given
         // a blur of its own, which is what MiBlur.applyLocalBlur does.
         //
+        // WHERE the write happens is the part that took three attempts, and it is not here.
+        //
+        // It was here, at prepare time, and that is what cost the lock screen its cards twice
+        // over: a row is the SAME view on the keyguard and in the notification centre, prepare
+        // time cannot tell which one it is being prepared for, and the material outlives the
+        // prepare. Measured on device: 21 rows written, all of them while the keyguard was up,
+        // and every one of them wrong there until the writes were taken back.
+        //
+        // This hook now only RECORDS which view the system considers a card's material - that
+        // choice is still the system's, and re-deriving it here would be the module inventing
+        // its own answer. The write moved to setCardBlurActive(), driven by the edges of the
+        // shade being open, which is the only moment in the module where "the notification
+        // centre is up" is answerable and where the tree is assembled enough to ask whether a
+        // view is under the panel. Asking that at prepare time is what failed twice.
+        //
         // Behind a switch and off by default: it writes OEM blur material on every row, and a
         // full-screen cover behind the cards is not obviously better than the app behind them.
         try {
             Class<?> notifUtil = Xp.findClass(CLS_NOTIF_UTIL, cl);
+            // Kept for rowClass(). The classloader a VIEW carries is the one that loaded ITS
+            // class, and the utility hands this hook framework views too - an ImageView's loader
+            // is the boot loader, which cannot see a single SystemUI class. Resolving the row
+            // class through it fails, rowOf() then answers null for everything, and the whole
+            // feature goes quiet without a single write being attempted. Measured: 15 failures
+            // and not one card touched.
+            sHostLoader = notifUtil.getClassLoader();
             Xp.hookAll(notifUtil, "applyElementViewBlend", chain -> {
                 Object result = chain.proceed();
                 if (sBlendCalls.incrementAndGet() == 1) {
                     Xp.log(TAG + "applyElementViewBlend is being called");
                 }
-                if (ShadeLayer.cardBlurOn()) {
-                    java.util.List<Object> a = chain.getArgs();
-                    if (a.size() > 1 && a.get(1) instanceof View) {
-                        final View v = (View) a.get(1);
-                        // Scoped, and the scope is not a nicety. An earlier version blurred
-                        // whatever this method was handed and the LOCK SCREEN lost its clock
-                        // glass - the utility reaches more views than its name says. See
-                        // shadeRow() for what "a row in the notification centre" means here.
-                        if (shadeRow(v)) {
-                            if (sBlurApplied.incrementAndGet() == 1) {
-                                Xp.log(TAG + "card blur applied to "
-                                        + v.getClass().getName() + " r="
-                                        + ShadeLayer.cardBlurRadius());
-                            }
-                            MiBlur.applyLocalBlur(v, ShadeLayer.cardBlurRadius());
-                        }
-                    } else if (sBadArgs.incrementAndGet() == 1) {
-                        Xp.log(TAG + "applyElementViewBlend: no View in arg 1 ("
-                                + (a.size() > 1 && a.get(1) != null
-                                        ? a.get(1).getClass().getName() : "null") + ")");
-                    }
+                // Recorded, never written. The switch is asked at the sweep instead, so that
+                // turning it on does not have to wait for every row to be prepared again.
+                java.util.List<Object> a = chain.getArgs();
+                if (a.size() > 1 && a.get(1) instanceof View) {
+                    final View v = (View) a.get(1);
+                    // Recorded, and NOT written - the write is the sweep's, at the edges of the
+                    // shade being open. The scope here is only "could this ever be one of our
+                    // cards", because the finer question is unanswerable at prepare time:
+                    //
+                    //  - a heads-up notification is never ours to restyle, and it is a row, so
+                    //    it can be named and dropped here;
+                    //  - a row's material is the ordinary case;
+                    //  - a view with NO row used to be dropped, and that was wrong: the media
+                    //    card is not a notification row and its background is handed to this very
+                    //    method. Which of the row-less views is the media card is asked at the
+                    //    sweep, where the tree exists and can answer.
+                    final View row = rowOf(v);
+                    if (row == null) noteCandidate(v, null);
+                    else if (!isHeadsUp(row)) noteCandidate(v, row);
+                } else if (sBadArgs.incrementAndGet() == 1) {
+                    Xp.log(TAG + "applyElementViewBlend: no View in arg 1 ("
+                            + (a.size() > 1 && a.get(1) != null
+                                    ? a.get(1).getClass().getName() : "null") + ")");
                 }
                 return result;
             });
@@ -1740,6 +1764,14 @@ public class Main extends XposedModule {
                         // the same door.
                         ShadeLayer.configure(i.getStringExtra("key"), i.getIntExtra("v", 0));
                         saveState();
+                    } else if ("rows".equals(op)) {
+                        dumpNotifRows();
+                    } else if ("cand".equals(op)) {
+                        dumpCandidates();
+                    } else if ("blurscan".equals(op)) {
+                        dumpBlurScan();
+                    } else if ("blurclear".equals(op)) {
+                        clearCardBlur();
                     } else if ("shade".equals(op)) {
                         Xp.log(TAG + "shade: mode=" + ShadeLayer.mode()
                                 + " " + ShadeLayer.describe());
@@ -8165,29 +8197,6 @@ public class Main extends XposedModule {
             new java.util.concurrent.atomic.AtomicInteger();
 
     /**
-     * Whether this view is a notification row IN THE NOTIFICATION CENTRE, and nothing else.
-     *
-     * The scope is the whole point of the function. Two questions, and both have to be yes:
-     *
-     * - **Inside `NotificationPanelView`.** That is the shade and nothing else: it rules out the
-     *   keyguard clock, the control centre, and every other view this same utility is used on.
-     *   An earlier version of this hook blurred whatever it was handed, on the assumption that
-     *   the method only saw notification rows, and it cost the lock screen its clock glass.
-     * - **Not a heads-up notification.** A floating notification is the same row class in the
-     *   same window, so the first question does not separate it - and the ask was explicitly
-     *   that pop-ups are not ours to restyle.
-     *
-     * Anything that cannot be answered is a NO. The failure mode of guessing yes is a broken
-     * system view somewhere else, which is exactly what the last guess cost.
-     */
-    private static boolean shadeRow(View v) {
-        final View row = rowOf(v);
-        if (row == null) return reject("no notification row in the ancestry", v);
-        if (isHeadsUp(row)) return reject("heads-up", v);
-        return true;
-    }
-
-    /**
      * The notification row this view belongs to, or null.
      *
      * Asked of the VIEW and not of its position, and the first attempt at this got that wrong.
@@ -8207,37 +8216,592 @@ public class Main extends XposedModule {
         return null;
     }
 
+    /**
+     * The host's classloader, captured where one is known to be SystemUI's. See the note at the
+     * capture: a view's own loader is not it, and using the view's is what silently disabled
+     * this whole feature once.
+     */
+    private static volatile ClassLoader sHostLoader;
+
     private static Class<?> rowClass(View v) {
         Class<?> rc = sNotifRowCls;
         if (rc != null) return rc;
+        ClassLoader ld = sHostLoader;
+        if (ld == null) {
+            ld = v.getClass().getClassLoader();
+            // A framework view's loader cannot see SystemUI at all. Nothing is wrong and there is
+            // nothing to try - the next call from a SystemUI view will resolve it.
+            if (ld == null) return null;
+        }
         try {
             rc = Xp.findClass(
                     "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow",
-                    v.getClass().getClassLoader());
+                    ld);
             sNotifRowCls = rc;
             return rc;
         } catch (Throwable t) {
-            Xp.log(TAG + "no ExpandableNotificationRow: " + t);
+            // Once, not per call: this is a failure that repeats on every element of every card.
+            if (!sNoRowCls) {
+                sNoRowCls = true;
+                Xp.log(TAG + "no ExpandableNotificationRow via " + ld + ": " + t
+                        + " - no card will be treated as a notification row");
+            }
             return null;
         }
     }
 
-    /**
-     * Why a row was skipped, once per distinct reason.
-     *
-     * The scope is deliberately biased towards no, so "nothing happened at all" and "the scope is
-     * wrong" look identical from outside - and the scope being wrong is exactly what a first cut
-     * of it gets. This says which gate closed.
-     */
-    private static final java.util.Set<String> sRowRejects =
-            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+    private static volatile boolean sNoRowCls;
 
-    private static boolean reject(String why, View v) {
-        if (sRowRejects.add(why)) {
-            Xp.log(TAG + "card blur skipped: " + why + " - view "
-                    + (v == null ? "null" : v.getClass().getName()));
+    /**
+     * Records a write, once per distinct (element, row) pair, with a running count.
+     *
+     * The first-only log this replaces made coverage invisible: "every row got the blur" and
+     * "exactly one row did" printed the same single line, and telling those apart is the whole
+     * of the current question.
+     */
+    /**
+     * The system's own choice of which view is a card's material - recorded, not written.
+     *
+     * The write used to happen right here, at prepare time, and that is what put it on the lock
+     * screen. A row is the SAME view on the keyguard and in the notification centre; prepare time
+     * cannot tell which one it is preparing for, and the material outlives the prepare. The
+     * element is still the system's to choose - only the moment moved, to the one place where
+     * "is this the notification centre" has an answer: the finished tree with the shade open.
+     * See setCardBlurActive().
+     */
+    private static final java.util.Map<View, View> sCandidates =
+            java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<View, View>());
+
+    private static void noteCandidate(View v, View row) {
+        synchronized (sCandidates) {
+            if (sCandidates.size() > 512) {
+                sCandidates.clear();
+                Xp.log(TAG + "card elements: candidate set overflowed, cleared");
+            }
+            if (!sCandidates.containsKey(v)) sCandidates.put(v, row);
+        }
+        // A row prepared while the notification centre is ALREADY up never sees the rising edge,
+        // and would sit there sampling the app behind the shade until the next pull-down. The
+        // sweep is idempotent and the candidate list is small, so asking again is the cheap half
+        // of that trade.
+        if (sCardBlurActive) setCardBlurActive(true, false);
+    }
+
+    /**
+     * Puts the local blur on every card element that is in the notification centre, or takes it
+     * back off every one that has it.
+     *
+     * Driven from the edges of the shade being open - ShadeLayer's own progress driver is the
+     * only thing in the module that knows the notification centre is up. Read the falling edge as
+     * the important one: the write is a property of a view and does not know when it has stopped
+     * being true, which is the whole of the lock screen bug.
+     */
+    /**
+     * Whether the shade is up AND the feature is switched on - both, so that a card element
+     * arriving later does not re-sweep for nothing while the switch is off.
+     */
+    private static volatile boolean sCardBlurActive;
+
+    static void setCardBlurActive(final boolean on) {
+        setCardBlurActive(on, true);
+    }
+
+    /**
+     * @param withChrome also look for the clear-all affordance, which means walking the whole
+     *                   shade window. True only on the edges of the shade being open: a card
+     *                   element arriving later re-runs the sweep, and a full tree walk per card
+     *                   is a lot of work to do on the frame a notification lands on.
+     */
+    private static void setCardBlurActive(final boolean on, final boolean withChrome) {
+        sCardBlurActive = on && ShadeLayer.cardBlurOn();
+        main().post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!on) {
+                        final int n = restoreCards();
+                        if (n > 0) Xp.log(TAG + "card blur off: restored " + n + " views");
+                        return;
+                    }
+                    if (!ShadeLayer.cardBlurOn()) {
+                        // Said out loud, and that is the fix to a real diagnosis problem: this
+                        // returned silently, and a sweep that writes nothing because a switch is
+                        // off looked identical in the log to a sweep that had no cards to write.
+                        Xp.log(TAG + "card blur on: switch is off, nothing written");
+                        return;
+                    }
+                    final java.util.List<View> vs;
+                    synchronized (sCandidates) {
+                        vs = new java.util.ArrayList<>(sCandidates.keySet());
+                    }
+                    int applied = 0, gone = 0, other = 0;
+                    for (int i = 0; i < vs.size(); i++) {
+                        final View v = vs.get(i);
+                        // No position test here, and its absence is a measurement, not a
+                        // simplification. It was "under NotificationPanelView", it rejected EVERY
+                        // card on this build, and the ancestry probe says why: the notification
+                        // stack is not under the panel at all. Measured chain -
+                        //
+                        //   NotificationBackgroundView#backgroundNormal
+                        //     < ExpandableNotificationRow
+                        //     < NotificationStackScrollLayout#notification_stack_scroller
+                        //     < SharedNotificationContainer#shared_notification_container
+                        //     < NotificationShadeWindowView#legacy_window_root
+                        //
+                        // - and the container's own name is the answer to the whole puzzle: it is
+                        // SHARED between the keyguard and the notification centre, so the two are
+                        // the same views in the same stack and no ancestry can separate them.
+                        //
+                        // The scoping is the TIMING instead, which is the stronger form of it.
+                        // Every candidate is already known to be a card element - either inside an
+                        // ExpandableNotificationRow and not a heads-up, or row-less and accepted
+                        // below only if it belongs to the media card - and this sweep only runs
+                        // across the edges of the shade being open on an unlocked phone. The
+                        // keyguard cannot be written to because it is not what is on screen while
+                        // the notification centre is up, which is
+                        // precisely the mistake the prepare-time write made.
+                        if (!v.isAttachedToWindow()) {
+                            gone++;
+                            continue;
+                        }
+                        if (sWritten.containsKey(v)) continue;
+                        final View row = sCandidates.get(v);
+                        // A row-less element is only ours if it belongs to the media card - the
+                        // one card that is not a notification row, and the one the utility hands
+                        // over as a bare ImageView. Everything else without a row is something
+                        // else in the window, and the clock glass the last wrong guess cost is
+                        // exactly what lives there.
+                        if (row == null && !insideMediaCard(v)) {
+                            other++;
+                            continue;
+                        }
+                        writeCard(v, row);
+                        applied++;
+                    }
+                    // The clear-all affordance, which is a different kind of thing from every
+                    // card here and is looked for separately.
+                    //
+                    // It never appears in the candidate list at all: the utility is not handed it,
+                    // so there is no element to wait for and no "was it accepted" to answer. It
+                    // is the notification centre's own chrome rather than one of its cards, and
+                    // the only handle on it is its id - so it is found by name, and every match is
+                    // logged in full. That log is not decoration: if the wrong view is picked,
+                    // this is the only place that can say so, because the pick is by name and a
+                    // name is a guess about what a view is for.
+                    final View panel = withChrome ? ShadeLayer.panelView() : null;
+                    if (panel != null) {
+                        final java.util.List<View> chrome = new java.util.ArrayList<>();
+                        collectClearChrome(panel.getRootView(), chrome);
+                        for (int i = 0; i < chrome.size(); i++) {
+                            final View c = chrome.get(i);
+                            if (sWritten.containsKey(c)) continue;
+                            writeCard(c, null);
+                            applied++;
+                            Xp.log(TAG + "clear-all: wrote to " + c.getClass().getName()
+                                    + " #" + viewIdOf(c) + " shown=" + c.isShown()
+                                    + " wh=" + c.getWidth() + "x" + c.getHeight()
+                                    + " " + MiBlur.describe(c));
+                        }
+                    }
+
+                    // Logged only when the numbers change. A new element arrives while the shade
+                    // is already up and re-runs the sweep, which is right but was printing the
+                    // same line ten times in a millisecond.
+                    final String line = applied + "/" + gone + "/" + other + "/" + sWritten.size();
+                    if (!line.equals(sLastSweep)) {
+                        sLastSweep = line;
+                        Xp.log(TAG + "card blur on: " + applied + " applied, " + gone
+                                + " detached, " + other + " not a card, "
+                                + sWritten.size() + " holding it");
+                    }
+                } catch (Throwable t) {
+                    Xp.log(TAG + "card blur sweep failed: " + t);
+                }
+            }
+        });
+    }
+
+    /** The last sweep line printed, so an unchanged sweep does not print again. */
+    private static volatile String sLastSweep = "";
+
+    /**
+     * Views whose id names the clear-all affordance.
+     *
+     * A match that CONTAINS another match is dropped - the pill and the layout that holds it can
+     * both be named for the same thing, and writing the local blur to both would blur the button
+     * twice, once as itself and once as its parent's background. The innermost match is the pill.
+     */
+    private static void collectClearChrome(View v, java.util.List<View> out) {
+        if (v.getId() != View.NO_ID) {
+            final String n = viewIdOf(v).toLowerCase();
+            if (n.contains("clear") || n.contains("dismiss")) {
+                for (int i = 0; i < out.size(); ) {
+                    if (isAncestorOf(v, out.get(i))) out.remove(i);
+                    else i++;
+                }
+                if (!isInsideAny(v, out)) out.add(v);
+            }
+        }
+        // Descends into a match as well: the pill and the layout holding it can both be named for
+        // the same thing, and the inner one is the pill.
+        if (!(v instanceof ViewGroup)) return;
+        final ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) collectClearChrome(g.getChildAt(i), out);
+    }
+
+    private static boolean isAncestorOf(View a, View b) {
+        for (View c = b; c != null; ) {
+            if (c == a) return true;
+            final android.view.ViewParent p = c.getParent();
+            c = (p instanceof View) ? (View) p : null;
         }
         return false;
+    }
+
+    private static boolean isInsideAny(View v, java.util.List<View> set) {
+        for (int i = 0; i < set.size(); i++) if (isAncestorOf(set.get(i), v)) return true;
+        return false;
+    }
+
+    /**
+     * Whether this view belongs to the media card.
+     *
+     * Asked of the TREE and not of the view's class, and asked at the sweep for the same reason
+     * everything else is: the card hands the hook a bare ImageView with nothing in it to
+     * recognise, and only the assembled tree can say whose it is. `mi_media_controls` is the
+     * module's own handle on this card - the same id the card takeover feature already uses.
+     */
+    private static boolean insideMediaCard(View v) {
+        int id = sMediaCardId;
+        if (id == -1) {
+            try {
+                id = v.getContext().getResources()
+                        .getIdentifier("mi_media_controls", "id", "com.android.systemui");
+            } catch (Throwable t) {
+                id = 0;
+            }
+            sMediaCardId = id;
+            Xp.log(TAG + "media card id = " + id);
+        }
+        if (id == 0) return false;
+        for (View c = v; c != null; ) {
+            if (c.getId() == id) return true;
+            final android.view.ViewParent p = c.getParent();
+            c = (p instanceof View) ? (View) p : null;
+        }
+        return false;
+    }
+
+    /** -1 until resolved, 0 when this build has no such id. */
+    private static volatile int sMediaCardId = -1;
+
+    private static void writeCard(View v, View row) {
+        noteBlurApplied(v, row);
+        MiBlur.applyLocalBlur(v, ShadeLayer.cardBlurRadius());
+    }
+
+    /** Takes the local blur back off every view it was written to. Returns how many. */
+    private static int restoreCards() {
+        final java.util.List<View> vs;
+        synchronized (sWritten) {
+            vs = new java.util.ArrayList<>(sWritten.keySet());
+        }
+        for (int i = 0; i < vs.size(); i++) {
+            final View v = vs.get(i);
+            MiBlur.restore(v, sWritten.get(v));
+        }
+        synchronized (sWritten) {
+            sWritten.clear();
+        }
+        return vs.size();
+    }
+
+    private static void noteBlurApplied(View v, View row) {
+        // Snapshot BEFORE the write, so the write can be taken back. The first snapshot wins: a
+        // row that is prepared again and again must go back to the material it had before the
+        // very first write, not to the one it had before the latest.
+        final int[] was = MiBlur.snapshot(v);
+        synchronized (sWritten) {
+            if (!sWritten.containsKey(v)) sWritten.put(v, was);
+        }
+        final int n = sBlurApplied.incrementAndGet();
+        final String kind = v.getClass().getName() + " in "
+                + (row == null ? "?" : row.getClass().getSimpleName());
+        if (sBlurAppliedKinds.add(kind)) {
+            Xp.log(TAG + "card blur applied #" + n + " to " + kind
+                    + " key=" + rowKey(row) + " inPanel=" + ShadeLayer.insidePanel(v)
+                    + " was=" + java.util.Arrays.toString(was)
+                    + " r=" + ShadeLayer.cardBlurRadius());
+        }
+    }
+
+    /**
+     * Views the local blur has been written to, by identity, with the state each had before it.
+     *
+     * Strong references, which is normally the wrong thing to hold in a system process - but
+     * this is the only record of what the system's own material was, and a view that has been
+     * forgotten is a view that cannot be put back. The rows come from a bounded recycled pool.
+     */
+    private static final java.util.Map<View, int[]> sWritten =
+            java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<View, int[]>());
+    private static final java.util.Set<String> sBlurAppliedKinds =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /** A notification row's stable key, for naming it in the log. "?" when this build moved it. */
+    private static String rowKey(View row) {
+        if (row == null) return "?";
+        try {
+            final Object k = Xp.callMethod(row, "getKey");
+            if (k != null) return String.valueOf(k);
+        } catch (Throwable ignored) {
+        }
+        return "?";
+    }
+
+    /**
+     * Every notification row under the panel, and whether the local blur reached it.
+     *
+     * The hook fires per row while the row is being prepared, so which rows it reaches is
+     * decided by the order the tree is built in - and nothing in the log said how many rows
+     * there were or which of them were missed. This asks the finished tree instead.
+     */
+    private static void dumpNotifRows() {
+        final View panel = ShadeLayer.panelView();
+        if (panel == null) {
+            Xp.log(TAG + "rows: no panel - is the shade up?");
+            return;
+        }
+        panel.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final Class<?> rc = rowClass(panel);
+                    if (rc == null) {
+                        Xp.log(TAG + "rows: no row class");
+                        return;
+                    }
+                    final java.util.List<View> rows = new java.util.ArrayList<>();
+                    // From the WINDOW, not from the panel: measured, the panel is not an
+                    // ancestor of a single card element on this build, so a walk rooted there
+                    // finds nothing and says "no rows" - which reads exactly like "no
+                    // notifications" and cost a wrong scope test.
+                    final View root = panel.getRootView();
+                    collectRows(root, rc, rows);
+                    Xp.log(TAG + "rows: " + rows.size() + " under "
+                            + root.getClass().getSimpleName()
+                            + " cardBlurOn=" + ShadeLayer.cardBlurOn()
+                            + " r=" + ShadeLayer.cardBlurRadius());
+                    for (int i = 0; i < rows.size(); i++) {
+                        final View r = rows.get(i);
+                        final int[] loc = new int[2];
+                        r.getLocationOnScreen(loc);
+                        Xp.log(TAG + "row#" + i + " " + r.getClass().getSimpleName()
+                                + " key=" + rowKey(r)
+                                + " headsUp=" + isHeadsUp(r)
+                                + " vis=" + r.getVisibility()
+                                + " at=" + loc[0] + "," + loc[1]
+                                + " wh=" + r.getWidth() + "x" + r.getHeight()
+                                + " written=" + sWritten.containsKey(r)
+                                + " shown=" + r.isShown()
+                                + " inPanel=" + ShadeLayer.insidePanel(r)
+                                + " bg=" + describeBackground(r));
+                        Xp.log(TAG + "  anc=" + ancestry(r));
+                    }
+                } catch (Throwable t) {
+                    Xp.log(TAG + "rows probe failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static void collectRows(View v, Class<?> rc, java.util.List<View> out) {
+        if (rc.isInstance(v)) out.add(v);
+        if (!(v instanceof ViewGroup)) return;
+        final ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) collectRows(g.getChildAt(i), rc, out);
+    }
+
+    /** A row's own background view - the thing the hook writes to - and its live blur state. */
+    private static String describeBackground(View row) {
+        if (!(row instanceof ViewGroup)) return "no children";
+        final ViewGroup g = (ViewGroup) row;
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < g.getChildCount(); i++) {
+            final View c = g.getChildAt(i);
+            if (!c.getClass().getName().contains("Background")) continue;
+            sb.append(c.getClass().getSimpleName())
+              .append("[written=").append(sWritten.containsKey(c))
+              .append(' ').append(MiBlur.describe(c)).append("] ");
+        }
+        return sb.length() == 0 ? "none" : sb.toString().trim();
+    }
+
+    /**
+     * Every view in the shade window carrying a blur, and its live state.
+     *
+     * This is the oracle for "whose glass is this". A card's material lives on one view, and a
+     * card whose glass is wrong cannot be fixed by anyone who does not know which view to write
+     * to - the media card's glass is not on a notification row, never reaches the hook, and so
+     * is invisible to every other probe in the module. Views we have written are marked with a
+     * `*`, so our own writes and the system's own material can be told apart in one listing.
+     */
+    private static void dumpBlurScan() {
+        final View panel = ShadeLayer.panelView();
+        if (panel == null) {
+            Xp.log(TAG + "blurscan: no panel - is the shade up?");
+            return;
+        }
+        panel.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final View root = panel.getRootView();
+                    Xp.log(TAG + "blurscan from " + root.getClass().getSimpleName()
+                            + " cardBlurOn=" + ShadeLayer.cardBlurOn()
+                            + " written=" + sWritten.size());
+                    scanBlur(root);
+                } catch (Throwable t) {
+                    Xp.log(TAG + "blurscan failed: " + t);
+                }
+            }
+        });
+    }
+
+    private static void scanBlur(View v) {
+        final int[] now = MiBlur.snapshot(v);
+        if (now[0] > 0 || now[1] > 0) {
+            final int[] loc = new int[2];
+            v.getLocationOnScreen(loc);
+            Xp.log(TAG + "blur" + (sWritten.containsKey(v) ? "*" : " ") + " "
+                    + v.getClass().getName() + " #" + viewIdOf(v)
+                    + " vis=" + v.getVisibility()
+                    + " at=" + loc[0] + "," + loc[1]
+                    + " wh=" + v.getWidth() + "x" + v.getHeight()
+                    + " inPanel=" + ShadeLayer.insidePanel(v)
+                    + " " + MiBlur.describe(v));
+        }
+        if (!(v instanceof ViewGroup)) return;
+        final ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) scanBlur(g.getChildAt(i));
+    }
+
+    /**
+     * Takes the local blur back off every view it was written to.
+     *
+     * The write is a property of a VIEW and outlives the state that justified it, which is the
+     * whole reason the lock screen's cards came out wrong: a row written while the notification
+     * centre is up keeps that material on the keyguard, where the same row is the same view and
+     * the correct glass samples the wallpaper instead.
+     */
+    private static void clearCardBlur() {
+        main().post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Xp.log(TAG + "blurclear: restored " + restoreCards() + " views");
+                } catch (Throwable t) {
+                    Xp.log(TAG + "blurclear failed: " + t);
+                }
+            }
+        });
+    }
+
+    /**
+     * The media card and everything under it, with each view's live blur.
+     *
+     * The one card whose glass is NOT on a notification row: it never appears as a card element,
+     * so it is invisible to the candidate list and to every other probe here. Its subtree is
+     * printed class by class because the card is translucent over the container's blur rather
+     * than carrying one of its own, and naming the view that would have to take a local blur is
+     * the only way to give it the cover as well.
+     */
+    private static void dumpMediaCard(View root) {
+        try {
+            final int id = root.getContext().getResources()
+                    .getIdentifier("mi_media_controls", "id", "com.android.systemui");
+            final View card = id == 0 ? null : root.findViewById(id);
+            if (card == null) {
+                Xp.log(TAG + "mediacard: not under " + root.getClass().getSimpleName());
+                return;
+            }
+            Xp.log(TAG + "mediacard " + card.getClass().getName() + " #" + viewIdOf(card)
+                    + " shown=" + card.isShown() + " wh=" + card.getWidth() + "x"
+                    + card.getHeight() + " " + MiBlur.describe(card));
+            walkMediaCard(card, "  ");
+        } catch (Throwable t) {
+            Xp.log(TAG + "mediacard probe failed: " + t);
+        }
+    }
+
+    private static void walkMediaCard(View v, String pad) {
+        if (!(v instanceof ViewGroup)) return;
+        final ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            final View c = g.getChildAt(i);
+            Xp.log(TAG + "  " + pad + c.getClass().getSimpleName() + " #" + viewIdOf(c)
+                    + " vis=" + c.getVisibility()
+                    + " wh=" + c.getWidth() + "x" + c.getHeight()
+                    + " " + MiBlur.describe(c));
+            walkMediaCard(c, pad + "  ");
+        }
+    }
+
+    /**
+     * A view's ancestry, innermost first, as `Class#id<Class#id<...`.
+     *
+     * Written because "is it under NotificationPanelView" turned out to be false for EVERY card
+     * element on this device, which leaves the question of what container they are under instead.
+     * A scope test can only be built on an ancestor that is actually there.
+     */
+    private static String ancestry(View v) {
+        final StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (View c = v; c != null && n < 7; n++) {
+            if (n > 0) sb.append('<');
+            sb.append(c.getClass().getSimpleName());
+            if (c.getId() != View.NO_ID) sb.append('#').append(viewIdOf(c));
+            final android.view.ViewParent p = c.getParent();
+            c = (p instanceof View) ? (View) p : null;
+        }
+        return sb.toString();
+    }
+
+    /** Every element the system has offered us, whether we wrote to it, and what it is. */
+    private static void dumpCandidates() {
+        final java.util.List<View> vs;
+        synchronized (sCandidates) {
+            vs = new java.util.ArrayList<>(sCandidates.keySet());
+        }
+        main().post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Xp.log(TAG + "cand: " + vs.size() + " elements, written=" + sWritten.size()
+                            + ", cardBlurOn=" + ShadeLayer.cardBlurOn());
+                    for (int i = 0; i < vs.size(); i++) {
+                        final View v = vs.get(i);
+                        final View row = sCandidates.get(v);
+                        final int[] loc = new int[2];
+                        v.getLocationOnScreen(loc);
+                        Xp.log(TAG + "cand " + (sWritten.containsKey(v) ? "*" : " ")
+                                + " " + v.getClass().getName() + " #" + viewIdOf(v)
+                                + " row=" + (row == null ? "none" : rowKey(row))
+                                + " mediaCard=" + (row == null && insideMediaCard(v))
+                                + " attached=" + v.isAttachedToWindow()
+                                + " shown=" + v.isShown()
+                                + " vis=" + v.getVisibility()
+                                + " at=" + loc[0] + "," + loc[1]
+                                + " wh=" + v.getWidth() + "x" + v.getHeight()
+                                + " inPanel=" + ShadeLayer.insidePanel(v)
+                                + " " + MiBlur.describe(v));
+                        Xp.log(TAG + "  anc=" + ancestry(v));
+                    }
+                    if (!vs.isEmpty()) dumpMediaCard(vs.get(0).getRootView());
+                } catch (Throwable t) {
+                    Xp.log(TAG + "cand probe failed: " + t);
+                }
+            }
+        });
     }
 
     /**

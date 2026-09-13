@@ -86,9 +86,6 @@ final class ShadeLayer {
      */
     private static volatile float sWpRise = 0.12f;
 
-    /** Reused every frame; the clip is set on the UI thread and must not allocate. */
-    private static final Rect sClip = new Rect();
-
     /**
      * The picture's own blur, in pixels, while the cover is still mostly shut.
      *
@@ -125,6 +122,10 @@ final class ShadeLayer {
     private static ShadeSpring sCurtainSpring;
     /** The blur spring's current value, for the trace and the diagnostics. */
     private static volatile float sRatio;
+    /** Steps the pushed ratio is quantised to. See onSpringUpdate. */
+    private static final float PUSH_STEPS = 24f;
+    /** The last value actually pushed, so an unchanged step is not pushed again. */
+    private static volatile float sPushed = -1f;
 
     // ------------------------------------------------------------------ entry points
 
@@ -152,6 +153,9 @@ final class ShadeLayer {
             final Context ctx = root.getContext();
             final FrameLayout frame = new FrameLayout(ctx);
             frame.setClipChildren(true);
+            // The curtain is a SHAPE, not a rectangle: see CURTAIN_OUTLINE.
+            frame.setClipToOutline(true);
+            frame.setOutlineProvider(CURTAIN_OUTLINE);
             frame.setAlpha(0f);
             // GONE rather than INVISIBLE: no measure, no layout, no draw, and a view that is
             // never touched still costs a traversal if it is merely invisible.
@@ -280,7 +284,9 @@ final class ShadeLayer {
             Xp.log(TAG + "expansion driver is live - first frame f=" + f);
         }
 
+        final long t0 = android.os.SystemClock.elapsedRealtimeNanos();
         applyProgress(f);
+        noteFrame(android.os.SystemClock.elapsedRealtimeNanos() - t0);
 
         if (!Main.verbose()) {
             // The release window closes itself even when nothing is watching, so turning the
@@ -395,6 +401,30 @@ final class ShadeLayer {
      * Cached, but re-checked against the tree: the shade's hierarchy is rebuilt across keyguard
      * transitions, and a stale panel view is one that takes writes nobody sees.
      */
+    /**
+     * Whether this view sits under the notification panel right now.
+     *
+     * The same question the card-blur scope tried to ask and could not answer at write time -
+     * see Main.shadeRow(). Asked from the diagnostics instead of from the write, it says whether
+     * a rejected view was rejected because its ancestry genuinely ends elsewhere or merely
+     * because the tree had not been assembled around it yet.
+     */
+    static boolean insidePanel(View v) {
+        final ViewGroup root = sRoot;
+        if (root == null) return false;
+        try {
+            final Class<?> pc = panelClass(root);
+            if (pc == null) return false;
+            for (View c = v; c != null; ) {
+                if (pc.isInstance(c)) return true;
+                final android.view.ViewParent p = c.getParent();
+                c = (p instanceof View) ? (View) p : null;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
     static View panelView() {
         final View cached = sPanel;
         if (cached != null && cached.getParent() == sRoot) return cached;
@@ -605,7 +635,20 @@ final class ShadeLayer {
             @Override
             public void onSpringUpdate(float v) {
                 sRatio = v;
-                ShadeBlur.pushRatio(v);
+                // Quantised, and pushed only when the step changes - the same fix applyPictureBlur
+                // makes to its own radius, applied to the other half of the same every-frame path.
+                //
+                // The spring chases a target that moves on every frame of a drag, so this used to
+                // hand MIUI's window-level blur a brand-new radius sixty times a second. The
+                // wallpaper blur is deliberately quantised to multiples of 4 because "setRenderEffect
+                // makes the render thread rebuild a filter each time it is called with a new radius";
+                // the window blur is very likely the same hazard, and it is the cheaper of the two
+                // to fix because the blur is invisible between steps. 24 steps over maxRadius 120 is
+                // five pixels of radius - below what the effect can show.
+                final float q = Math.round(v * PUSH_STEPS) / PUSH_STEPS;
+                if (q == sPushed) return;
+                sPushed = q;
+                ShadeBlur.pushRatio(q);
             }
         });
         blur.stiffness = sStiffness;
@@ -630,6 +673,9 @@ final class ShadeLayer {
         if (frame == null) return;
 
         if (!effectActive()) {
+            // Order matters: the cards are handed back BEFORE the flag says the effect is over,
+            // so no frame can decide the effect is still on while the material is already gone.
+            if (sEffectOn) Main.setCardBlurActive(false);
             sEffectOn = false;
             if (frame.getVisibility() != View.GONE) reset();
             return;
@@ -662,6 +708,14 @@ final class ShadeLayer {
         // sample the cover - but it cost a full-screen rescale and texture upload per change and
         // the whole shade went laggy. The blur that the cards get instead is the local one, in
         // Main's applyElementViewBlend hook, scoped to the shade's own rows.
+        // The cards' material follows the same edge the curtain does, and for the same reason:
+        // this is the only moment anything in the module knows the notification centre is up.
+        if (on != sEffectOn) {
+            Main.setCardBlurActive(on);
+            // The gesture is over the moment the curtain is asked for nothing: the frames after
+            // this are the blur spring settling, not the pull.
+            if (!on) logFrameCost();
+        }
         sEffectOn = on;
         if (!on) {
             // Hidden, but the drivers below keep running - and that is not tidiness.
@@ -701,7 +755,11 @@ final class ShadeLayer {
                 // is already at maximum and then relaxing.
                 sBlurSpring.snapTo(blurTarget(f));
             }
-            frame.setAlpha(f >= sAlphaEnd ? 1f : (f - sDeadZone) / (sAlphaEnd - sDeadZone));
+            final float alpha = f >= sAlphaEnd ? 1f : (f - sDeadZone) / (sAlphaEnd - sDeadZone);
+            if (alpha != sLastAlpha) {
+                sLastAlpha = alpha;
+                frame.setAlpha(alpha);
+            }
             applyPictureBlur(f);
 
             // The curtain follows the panel exactly; it is NOT sprung.
@@ -792,13 +850,122 @@ final class ShadeLayer {
         if (maxH <= 0) return;
 
         sCurtainFraction = cf;
-        sClip.set(0, 0, root.getWidth(), (int) (maxH * cf));
-        frame.setClipBounds(sClip);
+        final int line = (int) (maxH * cf);
+        // Written only when the value actually moves, and that is not tidiness: this function is
+        // reached TWICE on every frame while a finger is down - once from the curtain spring's own
+        // callback (visualFraction snapTo()s the edge to the hand) and once from the end of
+        // applyProgress - with the identical value both times. Each write is a RenderNode property
+        // change on a full-screen container, so the second one was a whole extra pass of work per
+        // frame, on the frames where the UI thread is already the thing that is short of time.
+        if (line != sLastClipBottom) {
+            sLastClipBottom = line;
+            sCurtainLine = line;
+            frame.invalidateOutline();
+        }
 
         // The cover sinks into place from above, on the SAME lagged value - so the picture
         // settles after the edge does rather than moving with it as one rigid sheet.
+        final float rise = -sWpRise * maxH * (1f - cf);
         final ImageView wp = sWp;
-        if (wp != null) wp.setTranslationY(-sWpRise * maxH * (1f - cf));
+        if (wp != null && rise != sLastRise) {
+            sLastRise = rise;
+            wp.setTranslationY(rise);
+        }
+    }
+
+    /** Last values written by applyCurtain, so an unchanged frame writes nothing at all. */
+    private static int sLastClipBottom = -1;
+    private static float sLastRise = Float.NaN;
+    private static volatile float sLastAlpha = Float.NaN;
+
+    /** The curtain's bottom edge, in the shade root's coordinates. Read by CURTAIN_OUTLINE. */
+    private static volatile float sCurtainLine;
+
+    /**
+     * The curtain's shape: a rounded rectangle whose bottom corners carry the display's own corner
+     * radius.
+     *
+     * The bottom edge is what the eye lands on - it is the only edge of this layer that is not the
+     * screen's own - and a hard rectangle there reads as a sheet of glass cut with a ruler. Rounding
+     * it by the same radius the display uses makes the curtain a shape the screen could have drawn
+     * itself.
+     *
+     * `setRoundRect` and not a Path: a round rect takes the renderer's stencil clip, while an
+     * arbitrary path can send the view through an offscreen layer on every frame of a pull. The
+     * top corners come along for the ride, which is free - the curtain's top is the screen's top,
+     * and the two radii sit exactly on top of each other.
+     */
+    private static final android.view.ViewOutlineProvider CURTAIN_OUTLINE =
+            new android.view.ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, android.graphics.Outline outline) {
+                    final float bottom = sCurtainLine;
+                    if (bottom <= 0f || view.getWidth() <= 0) {
+                        outline.setEmpty();
+                        return;
+                    }
+                    // Clamped: a radius over half the shape is no longer a rounded rectangle, and
+                    // a curtain one frame tall would otherwise be given one it cannot hold.
+                    final float r = Math.min(cornerRadius(),
+                            Math.min(bottom, view.getWidth()) / 2f);
+                    outline.setRoundRect(0, 0, view.getWidth(), (int) bottom, r);
+                }
+            };
+
+    /**
+     * What this module's own frame path costs, summarised once per gesture.
+     *
+     * One line per gesture and never one per frame - this module has already been bitten once by a
+     * probe that logged on every frame and starved the thing it was measuring. An average and a
+     * worst case are enough to answer the only question that matters here: is the curtain where
+     * the frame time goes, or is it somewhere this module does not own. The gesture that produces
+     * the answer is an ordinary pull-down.
+     */
+    private static void noteFrame(long ns) {
+        if (sFrameCount == 0) sFrameFirstNs = android.os.SystemClock.elapsedRealtimeNanos();
+        sFrameLastNs = android.os.SystemClock.elapsedRealtimeNanos();
+        sFrameCount++;
+        sFrameTotalNs += ns;
+        if (ns > sFrameMaxNs) sFrameMaxNs = ns;
+    }
+
+    private static void logFrameCost() {
+        final long n = sFrameCount;
+        if (n == 0) return;
+        Xp.log(TAG + "frame cost: " + n + " frames over " + ((sFrameLastNs - sFrameFirstNs) / 1000000)
+                + "ms, ours avg " + (sFrameTotalNs / n / 1000) + "us, max "
+                + (sFrameMaxNs / 1000) + "us");
+        sFrameCount = 0;
+        sFrameTotalNs = 0;
+        sFrameMaxNs = 0;
+    }
+
+    private static long sFrameCount;
+    private static long sFrameTotalNs;
+    private static long sFrameMaxNs;
+    private static long sFrameFirstNs;
+    private static long sFrameLastNs;
+
+    /** The display's corner radius, or 0 when it cannot be read. Resolved once. */
+    private static volatile float sCornerRadius = -1f;
+
+    private static float cornerRadius() {
+        float r = sCornerRadius;
+        if (r >= 0f) return r;
+        r = 0f;
+        try {
+            final ViewGroup root = sRoot;
+            final android.view.WindowInsets wi = root == null ? null : root.getRootWindowInsets();
+            final android.view.RoundedCorner c = wi == null ? null
+                    : wi.getRoundedCorner(android.view.RoundedCorner.POSITION_TOP_LEFT);
+            if (c != null) r = c.getRadius();
+        } catch (Throwable t) {
+            Xp.log(TAG + "no corner radius from the insets, the curtain line will run to the "
+                    + "screen edge: " + t);
+        }
+        sCornerRadius = r;
+        Xp.log(TAG + "display corner radius = " + r);
+        return r;
     }
 
     // ------------------------------------------------------------------ phase 1a probe
@@ -871,6 +1038,12 @@ final class ShadeLayer {
         sResets++;
         final FrameLayout frame = sFrame;
         final ImageView wp = sWp;
+        // The write guards in applyCurtain are invalidated here, not left at whatever the last
+        // frame held: reset() clears the clip and the rise, and a guard that still believed they
+        // were written would leave them cleared and never rewritten on the next pull.
+        sLastClipBottom = -1;
+        sLastRise = Float.NaN;
+        sLastAlpha = Float.NaN;
         // Stopped, not left running: a spring chasing a target nobody is drawing is a frame
         // callback per frame for the life of SystemUI.
         if (sBlurSpring != null) sBlurSpring.stop();
@@ -883,7 +1056,10 @@ final class ShadeLayer {
         if (sGateOn || ShadeGate.hidden()) ShadeGate.restore();
         if (frame != null) {
             frame.setAlpha(0f);
-            frame.setClipBounds(null);
+            // The outline goes with it: a stale rounded rect left on a GONE layer is one the next
+            // pull-down would be clipped to for the frame before the first applyCurtain().
+            sCurtainLine = 0f;
+            frame.invalidateOutline();
             frame.setVisibility(View.GONE);
         }
         if (wp != null) {
@@ -1361,7 +1537,7 @@ final class ShadeLayer {
                 + " frame=" + (frame == null ? "null"
                 : frame.getVisibility() + "@" + sPlacedAt
                   + " alpha=" + frame.getAlpha()
-                  + " clip=" + (frame.getClipBounds() == null ? "none" : frame.getClipBounds()))
+                  + " line=" + (int) sCurtainLine + " r=" + (int) cornerRadius())
                 + " panel=" + (sPanelCls == null ? "unresolved" : "resolved")
                 + " mode=" + sMode
                 + " pic=" + (sShown == null ? "none"
