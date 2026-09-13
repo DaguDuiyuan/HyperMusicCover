@@ -395,6 +395,18 @@ public class Main extends XposedModule {
     private static volatile float sBias = DEFAULT_BIAS;
 
     /**
+     * The notification centre's cover framing, as a DELTA on {@link #sBias} in milli-units.
+     *
+     * A delta rather than a bias of its own, and the choice is the whole design: zero means "the
+     * same framing as the lock screen", which is both the default and the only case that costs
+     * nothing at all - see shadePicture(). Anything else needs its own full-screen bitmap,
+     * because the framing is baked in at COMPOSE time (composeWallpaper places the sharp band at
+     * `(h - coverH) * bias`) and no transform on the layer can reproduce it without also
+     * changing the picture's scale.
+     */
+    private static volatile int sShadeBiasDelta = 0;
+
+    /**
      * Cover mode follows the media card. Not a setting: with it off the module does nothing at
      * all, which is not a state worth offering - uninstalling is the way to turn the module off.
      * The adb "auto" op can still flip it for a debugging session; it comes back on at startup.
@@ -6163,7 +6175,7 @@ public class Main extends XposedModule {
         // SystemUI's UI thread every frame the shade is open; a bitmap recycled underneath it
         // throws from inside BitmapDrawable.draw() and, unlike most of this module's failures,
         // does not stop - it repeats every frame until the process is killed.
-        setShadeArt(full);
+        setShadeArt(shadePicture(art, w, h, full));
         // By path, not by value, and that is not an optimisation.
         //
         // Measured on this phone: the largest cover in the library composes to 612KB, the
@@ -6438,6 +6450,58 @@ public class Main extends XposedModule {
      * media card without stranding the artwork under the clock - so it is a live knob, and a
      * change re-composes what is already on screen instead of waiting for the next track.
      */
+    /**
+     * What the notification shade's cover layer should show.
+     *
+     * The default is the lock screen's own picture, SHARED - one bitmap on the heap, and a
+     * pull-down reveals exactly what the lock screen is showing. A non-zero delta composes a
+     * second one at its own framing instead, which is a full-screen allocation and a second
+     * compose per push; that is the user's choice to make, and it is why the knob is a delta
+     * that starts at zero rather than a bias with a value.
+     *
+     * Called from the composing worker, so the throw is caught here rather than reaching
+     * KillApplicationHandler - the same reason pushArtToWallpaper catches its own compose.
+     */
+    private static Bitmap shadePicture(Bitmap art, int w, int h, Bitmap shared) {
+        final int d = sShadeBiasDelta;
+        if (d == 0) return shared;
+        try {
+            final float b = clamp01(sBias + d / 1000f);
+            // Said out loud because this is the ONE thing the setting costs, and the only way to
+            // tell "the second compose ran" from "the delta was ignored" without watching the
+            // heap: the shade's framing is baked in at compose time and nothing downstream can
+            // report it.
+            Xp.log(TAG + "shade art: own framing at bias " + b + " (lock screen " + sBias
+                    + ", delta " + d + ")");
+            return composeWallpaper(art, w, h, b);
+        } catch (Throwable t) {
+            // One track framed like the lock screen beats no cover at all, and the knob is still
+            // on screen to be moved back.
+            Xp.log(TAG + "the shade's own framing could not be composed, sharing the lock "
+                    + "screen's instead: " + t);
+            return shared;
+        }
+    }
+
+    /**
+     * The notification centre's framing, off the lock screen's by `v` thousandths.
+     *
+     * Re-composes what is already on screen rather than waiting for the next track, the way
+     * setBias() does - a framing knob is only worth having if you can watch it move.
+     */
+    static void setShadeBias(int v) {
+        if (v < -1000) v = -1000;
+        if (v > 1000) v = 1000;
+        sShadeBiasDelta = v;
+        saveState();
+        Xp.log(TAG + "shade cover bias delta = " + v);
+        if (sCoverMode) pushArtAsync(true, false);
+    }
+
+    static int shadeBiasDelta() {
+        return sShadeBiasDelta;
+    }
+
     private static void setBias(float v) {
         sBias = clamp01(v);
         saveState();
@@ -8423,6 +8487,173 @@ public class Main extends XposedModule {
 
     /** The last sweep line printed, so an unchanged sweep does not print again. */
     private static volatile String sLastSweep = "";
+
+    // ------------------------------------------------------------------ content push
+
+    /**
+     * The notification centre's content, moved down out of the cover's way.
+     *
+     * The curtain is the WHOLE screen: at a full pull there is nothing on it that is not the
+     * cover. The media card and the notification rows are glass over it, so the only way to show
+     * more of the picture is to open a band of it - this shifts the content down by a fixed
+     * amount, and what is left uncovered under the clock is cover with nothing on it.
+     *
+     * Driven from the same edge as the card blur, and for the same reason: the write is a property
+     * of a VIEW, the keyguard and the notification centre are the same views, and a shift left
+     * behind would move the lock screen's notifications with it.
+     *
+     * Written on the RISING edge, which is safe because of where the content is when it fires. The
+     * edge is at 4.5% of a pull and the stack's first pixel is a third of the way down the screen,
+     * so the write lands while the content is still off the bottom - there is no frame on which
+     * the move can be seen. Doing it on the falling edge instead would be a shift on the frame the
+     * shade is closing, which is the one frame that is definitely on screen.
+     */
+    private static volatile View sPushStack;
+    private static volatile View sPushCard;
+    /** The "no stack to move" warning is worth printing once, not on every pull-down. */
+    private static volatile boolean sPushWarned;
+
+    /**
+     * @param on whether the cover is up in the notification centre. False restores, always.
+     */
+    static void setShadeContentShift(final boolean on) {
+        final int px = ShadeLayer.contentPush();
+        main().post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!on || px <= 0) {
+                        pushRestore();
+                        return;
+                    }
+                    final View root = ShadeLayer.shadeRoot();
+                    if (root == null) return;
+                    final View stack = notificationStack(root);
+                    if (stack == null) {
+                        if (!sPushWarned) {
+                            sPushWarned = true;
+                            Xp.log(TAG + "content push: no notification stack under "
+                                    + root.getClass().getSimpleName() + " - there is nothing to "
+                                    + "move on this build, so the setting does nothing here");
+                        }
+                        return;
+                    }
+                    // The media card is the one piece of the shade that may NOT live under the
+                    // stack - and whether it does is the difference between one write and two.
+                    // Under it, the stack carries the card down by itself. Beside it, the card
+                    // needs the same shift on its own, or the gap opens between the card and the
+                    // notifications instead of above the card.
+                    final View card = mediaCardView(root);
+                    View host = null;
+                    if (card != null && !isAncestorOf(stack, card)) {
+                        final android.view.ViewParent sp = stack.getParent();
+                        if (sp instanceof View) host = outerChildUnder(card, (View) sp);
+                    }
+                    sPushStack = stack;
+                    sPushCard = host;
+                    stack.setTranslationY(px);
+                    if (host != null) host.setTranslationY(px);
+                    Xp.log(TAG + "content push: " + px + "px on "
+                            + stack.getClass().getSimpleName() + "#" + viewIdOf(stack)
+                            + (host != null
+                                    ? " + " + host.getClass().getSimpleName() + "#" + viewIdOf(host)
+                                    : card == null
+                                            ? " (no media card found - the card will not move)"
+                                            : " (card is inside the stack)"));
+                } catch (Throwable t) {
+                    Xp.log(TAG + "content push failed: " + t);
+                }
+            }
+        });
+    }
+
+    /**
+     * What the push is holding right now, for the shade diagnostic.
+     *
+     * The value is read back OFF THE VIEW rather than reported from our own write, because the
+     * question this exists to answer is precisely whether the write survived: the stack is
+     * SystemUI's own view and it is free to move itself, and "we set 300" and "the view is 300"
+     * are different claims. `ty=0` with `on/300px` is the answer "the system took it back".
+     */
+    static String shadePushDescribe() {
+        final View stack = sPushStack;
+        if (stack == null) return "off";
+        return "on/" + ShadeLayer.contentPush() + "px ty=" + stack.getTranslationY()
+                + (sPushCard == null ? "" : " card ty=" + sPushCard.getTranslationY());
+    }
+
+    /** Hands the two views back. Idempotent, and reachable from every path out of the shade. */
+    private static void pushRestore() {
+        final View stack = sPushStack;
+        final View card = sPushCard;
+        if (stack == null && card == null) return;
+        sPushStack = null;
+        sPushCard = null;
+        try {
+            if (stack != null && stack.getTranslationY() != 0f) stack.setTranslationY(0f);
+            if (card != null && card.getTranslationY() != 0f) card.setTranslationY(0f);
+            Xp.log(TAG + "content push: back to 0");
+        } catch (Throwable t) {
+            Xp.log(TAG + "content push could not be undone: " + t);
+        }
+    }
+
+    /**
+     * The stack the notification rows live in.
+     *
+     * By id first, then by class: this module's own hooks have already been bitten once by a
+     * renamed class on another HyperOS build, and a fallback walk that runs on the edges of a
+     * pull-down is cheaper than a setting that quietly does nothing.
+     */
+    private static View notificationStack(View root) {
+        try {
+            final int id = root.getContext().getResources()
+                    .getIdentifier("notification_stack_scroller", "id", "com.android.systemui");
+            if (id != 0) {
+                final View v = root.findViewById(id);
+                if (v != null) return v;
+            }
+        } catch (Throwable ignored) {
+        }
+        return findStackByClass(root);
+    }
+
+    private static View findStackByClass(View v) {
+        if (v.getClass().getSimpleName().equals("NotificationStackScrollLayout")) return v;
+        if (!(v instanceof ViewGroup)) return null;
+        final ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            final View hit = findStackByClass(g.getChildAt(i));
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
+    private static View mediaCardView(View root) {
+        try {
+            final int id = root.getContext().getResources()
+                    .getIdentifier("mi_media_controls", "id", "com.android.systemui");
+            return id == 0 ? null : root.findViewById(id);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * The child of `ancestor` that `v` sits inside, or null when `v` is not under it at all.
+     *
+     * Matching on the ANCESTOR and not on a class name on purpose: the media card's own container
+     * is an implementation detail of the build, and this asks the tree the one question that
+     * matters - which view would have to move for the card to move with it.
+     */
+    private static View outerChildUnder(View v, View ancestor) {
+        for (View c = v; c != null; ) {
+            final android.view.ViewParent p = c.getParent();
+            if (p == ancestor) return c;
+            c = (p instanceof View) ? (View) p : null;
+        }
+        return null;
+    }
 
     /**
      * Views whose id names the clear-all affordance.

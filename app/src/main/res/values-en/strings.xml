@@ -171,4 +171,12 @@
     <string name="shade_wpblur_summary">The cover\'s own blur radius while it is soft</string>
     <string name="shade_sharpstart">Sharpening point</string>
     <string name="shade_sharpstart_summary">Where it starts clearing; 1000 keeps it blurred throughout</string>
+    <string name="shade_contentpush">Push content down</string>
+    <string name="shade_contentpush_summary">Moves the media card and the notifications down together, uncovering a clear band of cover above them; 0 leaves it alone</string>
+    <string name="shade_clockpush">Clock and date up/down</string>
+    <string name="shade_clockpush_summary">Negative moves it up, positive down; the control centre\'s own clock and date only</string>
+    <string name="shade_carrierpush">Carriers up/down</string>
+    <string name="shade_carrierpush_summary">Negative moves it up, positive down; both carriers and the divider between them</string>
+    <string name="shade_shadebias">Cover position</string>
+    <string name="shade_shadebias_summary">Shifts the framing from the lock screen\'s; negative up, positive down. 0 is exactly the lock screen\'s, and costs no extra memory</string>
 </resources>

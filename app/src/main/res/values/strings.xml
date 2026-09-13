@@ -171,4 +171,12 @@
     <string name="shade_wpblur_summary">看不清时封面的模糊半径</string>
     <string name="shade_sharpstart">封面变清晰起点</string>
     <string name="shade_sharpstart_summary">拉到多少开始由糊变清，1000 为全程保持模糊</string>
+    <string name="shade_contentpush">下拉内容下移</string>
+    <string name="shade_contentpush_summary">音乐卡片和通知整体往下推，上方让出一条没有遮挡的封面；0 为原样</string>
+    <string name="shade_clockpush">时间与日期上下</string>
+    <string name="shade_clockpush_summary">负数上移、正数下移；只动控制中心顶部的时间和日期</string>
+    <string name="shade_carrierpush">运营商上下</string>
+    <string name="shade_carrierpush_summary">负数上移、正数下移；两个运营商和中间那条竖线一起动</string>
+    <string name="shade_shadebias">封面纵向位置</string>
+    <string name="shade_shadebias_summary">在锁屏构图的基础上挪，负数上移、正数下移；0 为与锁屏完全一致（此时不额外占内存）</string>
 </resources>

@@ -95,6 +95,10 @@ internal fun ShadePageView(
                         ShadeKnob(module, enabled, push, "wprise")
                         ShadeKnob(module, enabled, push, "wpblur")
                         ShadeKnob(module, enabled, push, "sharpstart")
+                        ShadeKnob(module, enabled, push, "contentpush")
+                        ShadeKnob(module, enabled, push, "clockpush")
+                        ShadeKnob(module, enabled, push, "carrierpush")
+                        ShadeKnob(module, enabled, push, "shadebias")
                     }
                 }
             }
@@ -211,5 +215,21 @@ private val KNOBS = listOf(
     Knob(
         "sharpstart", R.string.shade_sharpstart, R.string.shade_sharpstart_summary,
         100, 999, 700, 1000f
+    ),
+    Knob(
+        "contentpush", R.string.shade_contentpush, R.string.shade_contentpush_summary,
+        0, 1800, 0
+    ),
+    Knob(
+        "clockpush", R.string.shade_clockpush, R.string.shade_clockpush_summary,
+        -600, 600, 0
+    ),
+    Knob(
+        "carrierpush", R.string.shade_carrierpush, R.string.shade_carrierpush_summary,
+        -600, 600, 0
+    ),
+    Knob(
+        "shadebias", R.string.shade_shadebias, R.string.shade_shadebias_summary,
+        -1000, 1000, 0, 1000f
     ),
 )

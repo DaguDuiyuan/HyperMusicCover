@@ -463,6 +463,14 @@ final class ShadeLayer {
     private static volatile boolean sCardBlurOn;
     private static volatile int sCardBlurRadius = 100;
     /**
+     * How far the shade's own content is pushed down out of the cover's way, in pixels.
+     *
+     * Off by default and for the same reason as {@link #sMode}: it changes what a pull-down looks
+     * like, and that should be a choice rather than something an update does to everyone. See
+     * Main.setShadeContentShift for what it moves and why the write is safe where it is made.
+     */
+    private static volatile int sContentPush = 0;
+    /**
      * Whether the curtain takes its position from the finger rather than from the panel.
      *
      * **Off, and it has to be.** Measuring this device settled it: `expansion` is not a linear
@@ -513,6 +521,23 @@ final class ShadeLayer {
         else if ("gate".equals(key)) sGateOn = v != 0;
         else if ("cardblur".equals(key)) sCardBlurOn = v != 0;
         else if ("cardradius".equals(key)) sCardBlurRadius = clampInt(v, 0, 200);
+        else if ("contentpush".equals(key)) {
+            sContentPush = clampInt(v, 0, 1800);
+            // Re-applied against the LIVE state so a slider moves the content without a second
+            // pull-down. `sEffectOn` is the curtain's own answer to "is the cover up here", which
+            // is exactly the condition the write is scoped by.
+            Main.setShadeContentShift(sEffectOn && sContentPush > 0);
+        }
+        else if ("clockpush".equals(key)) {
+            ShadeHeader.setClock(clampInt(v, -600, 600));
+            // Re-armed against the live state so a slider moves the header without a second
+            // pull-down. ShadeHeader's own arm() strips the previous offset before applying the
+            // new one, so dragging the slider cannot accumulate.
+            ShadeHeader.arm(sEffectOn);
+        } else if ("carrierpush".equals(key)) {
+            ShadeHeader.setCarrier(clampInt(v, -600, 600));
+            ShadeHeader.arm(sEffectOn);
+        } else if ("shadebias".equals(key)) Main.setShadeBias(clampInt(v, -1000, 1000));
         else if ("touch".equals(key)) sFollowTouch = v != 0;
         else if ("maxlag".equals(key)) sMaxLag = clampInt(v, 0, 1000) / 1000f;
         else if ("stiffness".equals(key)) {
@@ -571,7 +596,8 @@ final class ShadeLayer {
 
     /** Every knob, in the order the settings page shows them. */
     static final String[] CFG_KEYS = {
-            "mode", "gate", "cardblur", "cardradius", "touch", "maxlag",
+            "mode", "gate", "cardblur", "cardradius", "contentpush",
+            "clockpush", "carrierpush", "shadebias", "touch", "maxlag",
             "stiffness", "damping", "curtainstiffness", "curtaindamping",
             "blursat", "deadzone", "alphaend",
             "wprise", "wpblur", "sharpstart",
@@ -589,6 +615,10 @@ final class ShadeLayer {
         if ("gate".equals(key)) return sGateOn ? 1 : 0;
         if ("cardblur".equals(key)) return sCardBlurOn ? 1 : 0;
         if ("cardradius".equals(key)) return sCardBlurRadius;
+        if ("contentpush".equals(key)) return sContentPush;
+        if ("clockpush".equals(key)) return ShadeHeader.clockShift();
+        if ("carrierpush".equals(key)) return ShadeHeader.carrierShift();
+        if ("shadebias".equals(key)) return Main.shadeBiasDelta();
         if ("touch".equals(key)) return sFollowTouch ? 1 : 0;
         if ("maxlag".equals(key)) return Math.round(sMaxLag * 1000f);
         if ("stiffness".equals(key)) return Math.round(sStiffness);
@@ -619,6 +649,11 @@ final class ShadeLayer {
 
     static int cardBlurRadius() {
         return sCardBlurRadius;
+    }
+
+    /** How far the shade's content is pushed down, in pixels. 0 is "leave it alone". */
+    static int contentPush() {
+        return sContentPush;
     }
 
     private static int clampInt(int v, int lo, int hi) {
@@ -676,6 +711,11 @@ final class ShadeLayer {
             // Order matters: the cards are handed back BEFORE the flag says the effect is over,
             // so no frame can decide the effect is still on while the material is already gone.
             if (sEffectOn) Main.setCardBlurActive(false);
+            // Unconditional, and not behind the same flag: this path is the cover being switched
+            // off or the phone locking mid-pull, and the shift it hands back is a property of
+            // SystemUI's own views - left on them, it moves the lock screen's notifications.
+            Main.setShadeContentShift(false);
+            ShadeHeader.disarm();
             sEffectOn = false;
             if (frame.getVisibility() != View.GONE) reset();
             return;
@@ -712,6 +752,14 @@ final class ShadeLayer {
         // this is the only moment anything in the module knows the notification centre is up.
         if (on != sEffectOn) {
             Main.setCardBlurActive(on);
+            // Only with a picture: the shift exists to uncover the cover, and shifting the whole
+            // shade's content for a pull-down that has nothing to reveal is a change with no
+            // reason behind it. background() is read here rather than per frame, so a mode-1
+            // wallpaper that has not loaded yet costs one request on this edge and nothing more.
+            Main.setShadeContentShift(on && background() != null);
+            // Not gated on a picture, unlike the content push: the header offsets are about where
+            // the control centre's own text sits, not about uncovering anything.
+            ShadeHeader.arm(on);
             // The gesture is over the moment the curtain is asked for nothing: the frames after
             // this are the blur spring settling, not the pull.
             if (!on) logFrameCost();
@@ -1054,6 +1102,11 @@ final class ShadeLayer {
         // Also when the switch has just been turned off mid-pull: the gate could have left the
         // panel hidden, and that state outlives the setting that caused it.
         if (sGateOn || ShadeGate.hidden()) ShadeGate.restore();
+        // Same reasoning as the gate: reachable from the cover exit, the keyguard rebuild and the
+        // disable op, and each of those can happen with the shade up and the content already
+        // shifted. A no-op when nothing is held.
+        Main.setShadeContentShift(false);
+        ShadeHeader.disarm();
         if (frame != null) {
             frame.setAlpha(0f);
             // The outline goes with it: a stale rounded rect left on a GONE layer is one the next
@@ -1540,6 +1593,9 @@ final class ShadeLayer {
                   + " line=" + (int) sCurtainLine + " r=" + (int) cornerRadius())
                 + " panel=" + (sPanelCls == null ? "unresolved" : "resolved")
                 + " mode=" + sMode
+                + " push=" + sContentPush + " pushNow=" + Main.shadePushDescribe()
+                + " hdr=" + ShadeHeader.describe()
+                + " sbias=" + Main.shadeBiasDelta()
                 + " pic=" + (sShown == null ? "none"
                         : sShown == sArt ? "cover"
                         : sShown == sWallpaper ? "wallpaper" : "stale")
