@@ -181,9 +181,9 @@ final class ClockCollapse {
         sYFrom = currentY(natural);
         sYTo = targetY(floor, natural);
         sExitToAod = false;
-        // A wake already lands with a give of its own (the OEM's glyphs settle as the lock screen
-        // arrives); the toggle does not, so it gets it from the spring.
-        start(Phase.ENTER, wake ? Main.EASE_COVER[0] : TOGGLE_ZETA);
+        // A wake's glyphs already settle after the size, on the OEM's own animation; a toggle's
+        // are given the same tail. See TOGGLE_GLYPH_RESPONSE.
+        start(Phase.ENTER, wake ? Float.NaN : TOGGLE_GLYPH_RESPONSE);
         Xp.log(TAG + "clock: enter" + (wake ? " from the AOD" : "") + " y " + Main.r1(sYFrom)
                 + " -> " + Main.r1(sYTo) + " from " + was);
     }
@@ -205,7 +205,10 @@ final class ClockCollapse {
         sYFrom = currentY(natural);
         sYTo = natural;
         sExitToAod = false;
-        start(Phase.EXIT, TOGGLE_ZETA);
+        // The entry's glyph tail, mirrored. Not by sizing for the full clock first: the glyphs
+        // are still squeezed and relatively far wider, and at full height they ran off both
+        // edges of the screen (recording 18:44). The pose follows the OEM's live clock instead.
+        start(Phase.EXIT, EXIT_GLYPH_RESPONSE);
         Xp.log(TAG + "clock: exit y " + Main.r1(sYFrom) + " -> " + Main.r1(sYTo));
     }
 
@@ -585,8 +588,10 @@ final class ClockCollapse {
                 // asks for the full height arrives at the top on purpose.
                 next = y - (max - min);
             }
+            // 2px, not 1: the reading rounds either side of the true knee and a slow glyph walk
+            // reads it every frame, which ping-ponged 742/743 and re-held the OEM each time.
             if (!Float.isNaN(next) && next > 0f
-                    && (Float.isNaN(sFloor) || Math.abs(next - sFloor) >= 1f)) {
+                    && (Float.isNaN(sFloor) || Math.abs(next - sFloor) >= 2f)) {
                 Xp.log(TAG + "clock: floor " + Main.r1(sFloor) + " -> " + Main.r1(next)
                         + " (height " + Main.r1(h) + " at y=" + Main.r1(y) + ")");
                 sFloor = next;
@@ -756,31 +761,57 @@ final class ClockCollapse {
     // ------------------------------------------------------------------ the spring
 
     /**
-     * The damping of a toggle between the big and small clock. Below the OEM's 0.88, so the clock
-     * goes a little past its size and comes back - about 3% of the travel, measured against a
-     * wake, whose clock arrives a few percent small and grows the last of the way on its own.
+     * The glyph spring of a toggle between the big and small clock: critically damped, 0.9s.
+     *
+     * Copied from a wake, measured frame by frame on the phone (op motiontrace): the clock's size
+     * lands in about 0.35s, and the OEM's glyphs keep settling after it - 22% of their change
+     * still to come at 0.41s, 2% at 0.81s - which is the "drawn in" look. That tail is exactly a
+     * zeta 1 spring of response 0.9s started with the size. A toggle used to walk the glyphs in
+     * lockstep with the size, so everything stopped at once.
      */
-    private static final float TOGGLE_ZETA = 0.74f;
+    private static final float TOGGLE_GLYPH_RESPONSE = 0.9f;
+    /** Where the glyph spring is aimed: past 1, so it crosses the end instead of creeping to it. */
+    private static final float GLYPH_AIM = 1.02f;
+    /** The same tail leaving, faster: the user found the height's catch-up too slow at 0.9. */
+    private static final float EXIT_GLYPH_RESPONSE = 0.55f;
 
-    /** How far the spring has ever got this transition: the OEM's y follows this, never a bounce. */
+    /** Whether this transition runs the glyph spring. */
+    private static boolean sGlyphTail;
+    /** The narrowest the clock has been drawn this entry: its width only ever closes in. */
+    private static float sMinDrawnW = Float.MAX_VALUE;
+
+    /** How far the pose spring has ever got: without a glyph spring the OEM's y follows this. */
     private static float sTPeak;
+    /** The glyph spring's position and velocity. */
+    private static float sG, sGv;
 
     private static void start(Phase p) {
-        start(p, Main.EASE_COVER[0]);
+        start(p, Float.NaN);
     }
 
-    private static void start(Phase p, final float zeta) {
+    /** @param glyphResponse the OEM's y on a spring of its own, in seconds; NaN = follow the pose */
+    private static void start(Phase p, float glyphResponse) {
         stopFrame();
         perfReset();
         sPhase = p;
         sT = 0f;
         sTv = 0f;
         sTPeak = 0f;
+        sG = 0f;
+        sGv = 0f;
+        final boolean glyphs = !Float.isNaN(glyphResponse);
+        sGlyphTail = glyphs;
+        sMinDrawnW = Float.MAX_VALUE;
+        final float gw0 = glyphs ? (float) (2 * Math.PI / glyphResponse) : 0f;
+        final float gk = gw0 * gw0;
+        final float gDamp = 2f * gw0;
+        final float zeta = Main.EASE_COVER[0];
         final float response = Main.sClockResponse;
         final float w0 = (float) (2 * Math.PI / response);
         final float k = w0 * w0;
         final float damp = 2f * zeta * w0;
         final long[] last = {0L};
+        final int[] frames = {0};
         sFrame = new Choreographer.FrameCallback() {
             @Override
             public void doFrame(long now) {
@@ -790,6 +821,10 @@ final class ClockCollapse {
                 last[0] = now;
                 if (dt <= 0f) dt = 1f / 120f;
                 if (dt > 0.05f) dt = 0.05f;
+                // The first frames of a toggle are the ones the rest of cover mode is busy on
+                // (wallpaper, card, colour), and a stall there used to be integrated whole: the
+                // clock jumped 110-140px in its second frame. Started from rest, it starts on time.
+                if (++frames[0] <= 3 && dt > 1f / 60f) dt = 1f / 120f;
                 int steps = Math.max(1, (int) Math.ceil(dt * 240f));
                 float h = dt / steps;
                 for (int i = 0; i < steps; i++) {
@@ -797,19 +832,42 @@ final class ClockCollapse {
                     sTv += a * h;
                     sT += sTv * h;
                 }
-                boolean done = Math.abs(sT - 1f) < 0.001f && Math.abs(sTv) < 0.01f;
-                if (done) sT = 1f;
-                // The OEM's shape follows the same progress. Its size and position do not
-                // matter: the pre-draw maps whatever it draws onto the pose.
+                boolean poseDone = Math.abs(sT - 1f) < 0.001f && Math.abs(sTv) < 0.01f;
+                if (poseDone) {
+                    sT = 1f;
+                    sTv = 0f;
+                }
+                // The OEM's shape: on its own, slower spring when one is given - the size lands
+                // and the glyphs keep settling after it - otherwise the pose's progress.
+                boolean shapeDone = true;
+                float shape;
+                if (glyphs) {
+                    // Aimed a little past the end and stopped where it crosses it. A spring that
+                    // settles onto 1 creeps the last few percent - 1-2px a frame for 250ms, which
+                    // reads as the clock stopping - and a test that calls it done at 99% then
+                    // hands the last 1% to the OEM in one frame (1022 -> 1030 measured). Crossing
+                    // at speed ends it at about a pixel a frame, with nothing left to jump.
+                    for (int i = 0; i < steps; i++) {
+                        float a = -gk * (sG - GLYPH_AIM) - gDamp * sGv;
+                        sGv += a * h;
+                        sG += sGv * h;
+                    }
+                    shapeDone = sG >= 1f;
+                    if (shapeDone) sG = 1f;
+                    shape = Math.max(0f, Math.min(1f, sG));
+                } else {
+                    // Monotonic: a bounce belongs to the pose. Walking the OEM back would re-shape
+                    // its glyphs and cost a relayout per frame for nothing.
+                    sTPeak = Math.max(sTPeak, sT);
+                    shape = Math.min(1f, sTPeak);
+                }
+                boolean done = poseDone && shapeDone;
                 if (sPerfLastAt != 0L) sPerfGapMax = Math.max(sPerfGapMax, now - sPerfLastAt);
                 sPerfLastAt = now;
                 sPerfN++;
                 if (!Float.isNaN(sYFrom) && !Float.isNaN(sYTo)) {
                     long y0 = System.nanoTime();
-                    // Monotonic: the bounce is the pose's. Walking the OEM back would re-shape
-                    // its glyphs and cost a relayout per frame for nothing.
-                    sTPeak = Math.max(sTPeak, sT);
-                    float y = done ? sYTo : sYFrom + (sYTo - sYFrom) * Math.min(1f, sTPeak);
+                    float y = done ? sYTo : sYFrom + (sYTo - sYFrom) * shape;
                     if (done && Main.sHoldY != null && Main.sHoldY != y) Main.sHoldY = null;
                     hold(y);
                     refineFloor(y);
@@ -965,8 +1023,16 @@ final class ClockCollapse {
      * out near 1, and the full-size clock is drawn for a frame: the flash.
      */
     private static final java.util.WeakHashMap<View, Float> sGlyphH = new java.util.WeakHashMap<>();
-    /** A jump worth re-placing for, as a fraction of the glyph height. */
-    private static final float GLYPH_JUMP = 0.02f;
+    /**
+     * A change worth re-placing for, in pixels of glyph height.
+     *
+     * Was 2% of the height, which only ever had to catch a wake's abrupt jump. With the glyphs on
+     * their own spring they change 1-3% every frame, right across that line, so every other
+     * frame was placed off last frame's box: the drawn height stepped +55 +52 +48 +22 +60 +7
+     * +42 +5 - the judder read as "顿". Any visible change now re-places; the pass is ~0.2ms,
+     * and RenderNode properties set during the draw still land on this frame.
+     */
+    private static final float GLYPH_JUMP_PX = 0.5f;
     private static boolean sRedoing;
 
     /**
@@ -987,7 +1053,7 @@ final class ClockCollapse {
         if (b == null) return;
         float h = b.height();
         Float was = sGlyphH.put(tv, h);
-        if (was == null || h <= 0f || Math.abs(h - was) <= GLYPH_JUMP * Math.max(h, was)) return;
+        if (was == null || h <= 0f || Math.abs(h - was) <= GLYPH_JUMP_PX) return;
         sRedoing = true;
         try {
             frame();
@@ -1045,6 +1111,18 @@ final class ClockCollapse {
             m.dateH = 0f;
         }
         return !(m.anchored && date == null);
+    }
+
+    /** For MotionTrace: the last frame's glyphs and the two springs, as drawn on screen. */
+    static String traceLine() {
+        Live m = LIVE;
+        View g = firstTarget();
+        if (m.box == null || g == null) return " clk=none";
+        float s = g.getScaleY();
+        return " clk[" + sPhase + " t=" + Main.r3(sT) + " g=" + Main.r3(sG)
+                + " ink=" + Main.r1(m.unit * s) + "x" + Main.r1(m.box.width() * g.getScaleX())
+                + " oem=" + Main.r1(m.unit) + "x" + Main.r1(m.box.width())
+                + " top=" + Main.r1(m.inkTop + g.getTranslationY()) + " y=" + Main.sHoldY + "]";
     }
 
     /** What is on screen right now, from the transforms currently on the views. */
@@ -1148,6 +1226,10 @@ final class ClockCollapse {
             float t = sT;
             boolean in = phase == Phase.ENTER;
             float toTop = in ? coverTop : m.inkTop;
+            // Leaving, the size follows the OEM's own clock as its glyphs grow on their spring:
+            // one smooth curve, in the OEM's own proportions the whole way, so never wider than
+            // the clock it lands on. A width cap tried first put a kink in the growth where it
+            // started to bind (40px a frame to 14 in one frame) - the "顿" at the end.
             float toUnit = in ? coverUnit : m.unit;
             float toDate = in ? coverDate : m.dateTop;
             top = sFromTop + (toTop - sFromTop) * t;
@@ -1159,13 +1241,31 @@ final class ClockCollapse {
         }
 
         float scale = unit / m.unit;
+        float scaleX = scale;
+        if (phase == Phase.ENTER && sGlyphTail && m.box.width() > 0f) {
+            // The OEM's glyph aspect is not monotonic along the walk - measured 1.47 -> 1.68 ->
+            // 1.50 while the height held - so the drawn width would swell and shrink back as the
+            // clock arrives. Only the width is held to closing in. Holding it through the uniform
+            // scale took the height 12px under its target and let it spring back on landing,
+            // which was worse; squeezing X alone narrows the glyphs a few percent for a moment
+            // and returns to uniform by itself as the aspect comes back.
+            float w = m.box.width() * scale;
+            if (w > sMinDrawnW) {
+                // Faded out with the glyph spring, so landing is uniform whatever the digits do.
+                float held = sMinDrawnW / m.box.width();
+                float g = Math.max(0f, Math.min(1f, sG));
+                scaleX = held + (scale - held) * g * g;
+            } else {
+                sMinDrawnW = w;
+            }
+        }
         for (View root : Main.clockRoots()) {
             View g = Main.clockTarget(root);
             if (g == null) continue;
             float px = Main.clockPivotX(g, m.box);
             if (g.getPivotX() != px) g.setPivotX(px);
             if (g.getPivotY() != m.box.top) g.setPivotY(m.box.top);
-            if (g.getScaleX() != scale) g.setScaleX(scale);
+            if (g.getScaleX() != scaleX) g.setScaleX(scaleX);
             if (g.getScaleY() != scale) g.setScaleY(scale);
             float ty = top - (parentTop(g) + g.getTop() + m.box.top);
             if (Math.abs(g.getTranslationY() - ty) >= 0.25f) g.setTranslationY(ty);

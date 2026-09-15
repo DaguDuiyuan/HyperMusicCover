@@ -823,6 +823,12 @@ public class Main extends XposedModule {
             });
             Xp.hookAll(ks, "onStartedWakingUp", chain -> {
                 ClockCollapse.noteWaking();
+                main().post(new Runnable() {
+                    @Override
+                    public void run() {
+                        MotionTrace.start("wake");
+                    }
+                });
                 Object result = chain.proceed();
                 main().post(new Runnable() {
                     @Override
@@ -1913,6 +1919,8 @@ public class Main extends XposedModule {
                         dumpGeom();
                     } else if ("ink".equals(op)) {
                         dumpInk();
+                    } else if ("motiontrace".equals(op)) {
+                        MotionTrace.arm(i.getIntExtra("n", 4));
                     } else if ("geomtrace".equals(op)) {
                         startGeomTrace(i.getIntExtra("ms", 4000));
                     } else if ("state".equals(op)) {
@@ -7810,6 +7818,7 @@ public class Main extends XposedModule {
     private static void exitFromTap(String why) {
         sTapSuppressed = true;
         Xp.log(TAG + why + ": leaving cover mode");
+        MotionTrace.start("toggle-out");
         setCoverEnabled(false, true);
     }
 
@@ -7821,6 +7830,7 @@ public class Main extends XposedModule {
         sTapSuppressed = false;
         sTrackKey = "";
         Xp.log(TAG + why + ": expanding into cover mode");
+        MotionTrace.start("toggle-in");
         onMediaUpdate();
     }
 
