@@ -211,6 +211,32 @@ public class WallpaperProbe {
      */
     private static volatile Bitmap sOrig;
     private static volatile int sOrigPrint;
+
+    // ------------------------------------------------------------------ the OEM's darkening
+
+    /**
+     * Whether the OEM darkens the lock wallpaper, as it last decided, and whether it has decided
+     * at all since this process started.
+     *
+     * Read off the dex: KeyguardImageEngineImpl.W() calls renderer.updateMaskLayerStatus(need,
+     * isDark), and isDark is `!(colorHints & SUPPORTS_DARK_TEXT) && support_dark` from the lock
+     * slot's MIUI data - nothing to do with dark mode. It lands in AnimImageGLProgram.mDarken,
+     * which commonDraw() turns into uDarken, and the shader then pulls every pixel 10% of its
+     * brightness towards black: white comes out at 230. A lock slot the module had to split off
+     * gets support_dark=true by default, so a user whose lock screen used to follow the desktop
+     * sees it come back from cover mode a shade darker than it went in.
+     *
+     * The cover is not a wallpaper and is not meant to be dimmed, so the flag is withheld from
+     * whatever picture is a cover and handed back to the original. Per picture, not per moment:
+     * the fade in either direction then crossfades a darkened original with an undarkened cover,
+     * rather than jumping 10% at one end of it.
+     */
+    private static volatile boolean sOemDarken;
+    private static volatile boolean sOemDarkenKnown;
+    /** What the OEM's keyguard texture holds right now is a cover, not the real wallpaper. */
+    private static volatile boolean sTexShowsCover;
+    /** Set when the program on screen has no mDarken to write; the OEM's value stands from then on. */
+    private static volatile boolean sDarkenBroken;
     /** The frame the fade is on. Non-null only while one is running. */
     private static volatile Bitmap sFade;
     /** Reused across fades: a 12MB allocation per transition is itself a dropped frame. */
@@ -475,6 +501,7 @@ public class WallpaperProbe {
                             abortGpuFade(gf);
                         } else {
                             args[0] = ov;
+                            sTexShowsCover = ov != sOrig;
                             Object r = chain.proceed(args);
                             if (!gf.swapRequested) gf.armed = true;
                             else if (ov == gf.dest) gf.swapUploaded = true;
@@ -509,6 +536,10 @@ public class WallpaperProbe {
                     }
                     if (fade != null) {
                         args[0] = fade;
+                        // A CPU blend is both pictures in one texture, so it cannot be darkened
+                        // per picture. It follows the art instead, which only differs from the
+                        // GPU fade at the very end of a fade out of cover mode.
+                        sTexShowsCover = sArt != null;
                         // proceed() is the upload: once it returns, the buffer has been read
                         // and may be composed into again.
                         try {
@@ -521,6 +552,7 @@ public class WallpaperProbe {
                         }
                     }
                     Bitmap art = sArt;
+                    sTexShowsCover = art != null;
                     // The one moment the real lock wallpaper passes through here. Once the art
                     // is set the getBitmap short-circuit below means the OEM never decodes it
                     // again, so this is the only chance to learn what to fade back to.
@@ -706,6 +738,33 @@ public class WallpaperProbe {
             Xp.log(TAG + "frosting hook failed: " + t);
         }
 
+        // The OEM's darkening decision, kept for the original and withheld from the cover. See
+        // sOemDarken. Its own block: a build that renames this loses the fix, not the cover.
+        try {
+            Class<?> ar = Xp.findClass(
+                    "com.miui.miwallpaper.opengl.AnimImageWallpaperRenderer", sCl);
+            Xp.hookAll(ar, "updateMaskLayerStatus", chain -> {
+                Object self = chain.getThisObject();
+                Object[] args = chain.getArgs().toArray();
+                if (self == null || args.length != 2 || !(args[1] instanceof Boolean)
+                        || !self.getClass().getName().contains("Keyguard")) {
+                    return chain.proceed();
+                }
+                boolean dark = (Boolean) args[1];
+                if (!sOemDarkenKnown || dark != sOemDarken) {
+                    Xp.log(TAG + "OEM darkens the lock wallpaper: " + dark
+                            + (dark ? " - withheld from the cover" : ""));
+                }
+                sOemDarken = dark;
+                sOemDarkenKnown = true;
+                args[1] = dark && !sTexShowsCover;
+                return chain.proceed(args);
+            });
+            Xp.log(TAG + "darken hooked");
+        } catch (Throwable t) {
+            Xp.log(TAG + "darken hook failed, the cover stays dimmed where the OEM dims: " + t);
+        }
+
         // The GPU crossfade's frames. Declared on the base class, which the keyguard renderer
         // reaches through AnimImageWallpaperRenderer's super call; the desktop renderer passes
         // through here too and is let alone by the identity check.
@@ -715,6 +774,10 @@ public class WallpaperProbe {
             sPlainProgram = Xp.findClass(
                     "com.miui.miwallpaper.opengl.ordinary.AnimImageGLProgram", sCl);
             Xp.hookAll(base, "onDrawFrame", chain -> {
+                if (sOemDarkenKnown && !sDarkenBroken
+                        && chain.getThisObject() == sKeyguardRenderer) {
+                    applyDarken(chain.getThisObject());
+                }
                 Object r = chain.proceed();
                 if (chain.getThisObject() != sKeyguardRenderer) return r;
                 GpuFade f = sGpuFade;
@@ -1184,6 +1247,25 @@ public class WallpaperProbe {
     }
 
     /**
+     * GL thread, before the OEM draws: the darkening that belongs to the picture in its texture.
+     * Every frame rather than once, because the texture changes hands under reloads the OEM's
+     * own updateMaskLayerStatus() does not follow.
+     */
+    private static void applyDarken(Object renderer) {
+        try {
+            Object prog = Xp.getObjectField(Xp.getObjectField(renderer, "mAnimator"), "mProgram");
+            if (prog == null) return;
+            int want = sOemDarken && !sTexShowsCover ? 1 : 0;
+            if (((Integer) Xp.getObjectField(prog, "mDarken")).intValue() != want) {
+                Xp.setObjectField(prog, "mDarken", want);
+            }
+        } catch (Throwable t) {
+            sDarkenBroken = true;
+            Xp.log(TAG + "cannot set the darkening, leaving it to the OEM: " + t);
+        }
+    }
+
+    /**
      * One frame of the GPU fade, on the GL thread, after the OEM has drawn the far end.
      *
      * Also where our texture is let go of - when its fade has ended or been replaced, and only
@@ -1314,12 +1396,28 @@ public class WallpaperProbe {
         fn[3] = one[0];
         GLES20.glGetFloatv(GLES20.GL_BLEND_COLOR, sGlColor, 0);
 
+        // draw() is a bare glDrawArrays, so the overlay inherits the uniforms commonDraw() set
+        // for the picture underneath - uDarken included. When only one of the two is the
+        // original, the overlay gets its own value, and it is put back after.
+        boolean darkUnder = false, darkOver = false;
+        int uDarken = -1;
+        if (sOemDarkenKnown && sOemDarken && !sDarkenBroken) {
+            darkUnder = !sTexShowsCover;
+            darkOver = f.from == sOrig;
+            if (darkOver != darkUnder) {
+                uDarken = ((Integer) Xp.getObjectField(wp, "uDarken")).intValue();
+                GLES20.glUniform1i(uDarken, darkOver ? 1 : 0);
+            }
+        }
+
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_CONSTANT_ALPHA, GLES20.GL_ONE_MINUS_CONSTANT_ALPHA);
         GLES20.glBlendColor(0f, 0f, 0f, alpha);
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, sGlTex);
         Xp.callMethod(wp, "draw");
+
+        if (uDarken != -1) GLES20.glUniform1i(uDarken, darkUnder ? 1 : 0);
 
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, oemTex);
         GLES20.glBlendFuncSeparate(fn[0], fn[1], fn[2], fn[3]);
