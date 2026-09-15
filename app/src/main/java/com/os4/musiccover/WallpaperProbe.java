@@ -227,12 +227,29 @@ public class WallpaperProbe {
      * sees it come back from cover mode a shade darker than it went in.
      *
      * The cover is not a wallpaper and is not meant to be dimmed, so the flag is withheld from
-     * whatever picture is a cover and handed back to the original. Per picture, not per moment:
-     * the fade in either direction then crossfades a darkened original with an undarkened cover,
-     * rather than jumping 10% at one end of it.
+     * whatever picture is a cover. Per picture, not per moment: the fade in either direction
+     * then crossfades the original at its own darkening with an undarkened cover, rather than
+     * jumping 10% at one end of it.
+     *
+     * The original does not get the lock slot's own flag either, but the DESKTOP's - see
+     * origDarken(). Keeping the OEM's value there was the first fix, and it left the complaint
+     * standing: the user's measure is "the lock screen is darker than the desktop", and on the
+     * device that reported it the two slots came back support_dark=true / false.
      */
     private static volatile boolean sOemDarken;
     private static volatile boolean sOemDarkenKnown;
+    /**
+     * The desktop renderer's own darkening, as the OEM last handed it over. It goes through the
+     * same updateMaskLayerStatus(), so the hook reads it there without touching R8-renamed
+     * WallpaperServiceController internals.
+     */
+    private static volatile boolean sHomeDarken;
+    private static volatile boolean sHomeDarkenKnown;
+
+    /** The darkening the lock screen's real wallpaper is drawn with: the desktop's, once known. */
+    private static boolean origDarken() {
+        return sHomeDarkenKnown ? sHomeDarken : sOemDarken;
+    }
     /** What the OEM's keyguard texture holds right now is a cover, not the real wallpaper. */
     private static volatile boolean sTexShowsCover;
     /** Set when the program on screen has no mDarken to write; the OEM's value stands from then on. */
@@ -746,10 +763,21 @@ public class WallpaperProbe {
             Xp.hookAll(ar, "updateMaskLayerStatus", chain -> {
                 Object self = chain.getThisObject();
                 Object[] args = chain.getArgs().toArray();
-                if (self == null || args.length != 2 || !(args[1] instanceof Boolean)
-                        || !self.getClass().getName().contains("Keyguard")) {
+                if (self == null || args.length != 2 || !(args[1] instanceof Boolean)) {
                     return chain.proceed();
                 }
+                String cls = self.getClass().getName();
+                if (cls.contains("Desktop")) {
+                    boolean home = (Boolean) args[1];
+                    if (!sHomeDarkenKnown || home != sHomeDarken) {
+                        Xp.log(TAG + "OEM darkens the desktop wallpaper: " + home
+                                + " - the lock screen's own wallpaper follows it");
+                    }
+                    sHomeDarken = home;
+                    sHomeDarkenKnown = true;
+                    return chain.proceed();
+                }
+                if (!cls.contains("Keyguard")) return chain.proceed();
                 boolean dark = (Boolean) args[1];
                 if (!sOemDarkenKnown || dark != sOemDarken) {
                     Xp.log(TAG + "OEM darkens the lock wallpaper: " + dark
@@ -757,7 +785,7 @@ public class WallpaperProbe {
                 }
                 sOemDarken = dark;
                 sOemDarkenKnown = true;
-                args[1] = dark && !sTexShowsCover;
+                args[1] = origDarken() && !sTexShowsCover;
                 return chain.proceed(args);
             });
             Xp.log(TAG + "darken hooked");
@@ -1255,7 +1283,7 @@ public class WallpaperProbe {
         try {
             Object prog = Xp.getObjectField(Xp.getObjectField(renderer, "mAnimator"), "mProgram");
             if (prog == null) return;
-            int want = sOemDarken && !sTexShowsCover ? 1 : 0;
+            int want = origDarken() && !sTexShowsCover ? 1 : 0;
             if (((Integer) Xp.getObjectField(prog, "mDarken")).intValue() != want) {
                 Xp.setObjectField(prog, "mDarken", want);
             }
@@ -1401,7 +1429,7 @@ public class WallpaperProbe {
         // original, the overlay gets its own value, and it is put back after.
         boolean darkUnder = false, darkOver = false;
         int uDarken = -1;
-        if (sOemDarkenKnown && sOemDarken && !sDarkenBroken) {
+        if (sOemDarkenKnown && origDarken() && !sDarkenBroken) {
             darkUnder = !sTexShowsCover;
             darkOver = f.from == sOrig;
             if (darkOver != darkUnder) {
