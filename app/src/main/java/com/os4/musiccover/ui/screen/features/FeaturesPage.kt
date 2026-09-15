@@ -192,9 +192,15 @@ internal fun CoverPageView(
                             clockPad = g.clockPad,
                             clockX = g.clockX,
                             clockPivotX = g.clockPivotX,
+                            clockFull = g.clockFull,
                         )
                     )
                 }
+            }
+            // Only while the slider has never been moved: the size is then the dp default in
+            // the style's terms, and it changes with the style. Once set, the slider owns it.
+            if (module.clockSize <= 0f && reply.clockSize > 0f) {
+                module = module.copy(clockSize = reply.clockSize)
             }
             shots = ModuleBridge.Preview(
                 card = reply.card ?: shots.card,
@@ -229,6 +235,8 @@ internal fun CoverPageView(
                 art = art,
                 bias = module.bias,
                 clockHeightDp = module.clockHeightDp,
+                clockSize = module.clockSize,
+                clockOffsetDp = module.clockOffsetDp,
                 glassEnd = module.glassEnd,
                 geometry = module.geometry,
                 card = shots.card,
@@ -295,32 +303,35 @@ private fun ClockGroup(
 ) {
     val context = LocalContext.current
     Column {
-        // The top of the slider is the style's own size, whatever that is.
-        //
-        // Asking for a taller clock than the style draws is asking for it to grow, and the
-        // module refuses that: kForBox() caps the scale at 1, so a digit already shorter than
-        // the setting is left alone. Travel above the glyph height is therefore dead - the
-        // thumb moves and the clock does not - and the old fixed 64dp top cut the styles with
-        // taller digits off from the top of their own range, which is the one setting that
-        // means "do not collapse me at all". The magazine style, already 38dp, stops at 38; a
-        // style whose digits are 149dp rides to 149.
-        val maxDp = with(LocalDensity.current) {
-            val glyph = module.geometry.clockH - 2f * module.geometry.clockPad
-            if (module.geometry.hasClock && glyph > 0f) {
-                glyph.toDp().value.coerceAtLeast(CLOCK_HEIGHT_MIN_DP + 2f)
-            } else {
-                CLOCK_HEIGHT_MAX_DP
-            }
-        }
+        // Where the date and the clock sit, moved as one block from where cover mode puts them.
         ValueSlider(
             title = stringResource(R.string.clock_height),
             summary = stringResource(R.string.clock_height_summary),
-            value = module.clockHeightDp.coerceIn(CLOCK_HEIGHT_MIN_DP, maxDp),
-            valueRange = CLOCK_HEIGHT_MIN_DP..maxDp,
+            value = module.clockOffsetDp.coerceIn(CLOCK_OFFSET_MIN_DP, CLOCK_OFFSET_MAX_DP),
+            valueRange = CLOCK_OFFSET_MIN_DP..CLOCK_OFFSET_MAX_DP,
             enabled = enabled,
+            label = { "${it.roundToInt()} dp" },
             onValueChange = {
-                onChange(module.copy(clockHeightDp = it))
-                ModuleBridge.setClockHeight(context, it)
+                // Whole dp: a fraction of one is invisible, and the number reads cleaner.
+                val dp = it.roundToInt().toFloat()
+                onChange(module.copy(clockOffsetDp = dp))
+                ModuleBridge.setClockOffset(context, dp)
+            },
+        )
+        // A fraction of the style's own full clock, the one shown with cover mode off. The
+        // collapse cannot make a clock bigger than that, so 100% is the top.
+        ValueSlider(
+            title = stringResource(R.string.clock_size),
+            summary = stringResource(R.string.clock_size_summary),
+            value = (if (module.clockSize > 0f) module.clockSize else DEFAULT_CLOCK_SIZE)
+                .coerceIn(CLOCK_SIZE_MIN, 1f),
+            valueRange = CLOCK_SIZE_MIN..1f,
+            enabled = enabled,
+            label = { "${(it * 100f).roundToInt()}%" },
+            onValueChange = {
+                val size = (it * 100f).roundToInt() / 100f
+                onChange(module.copy(clockSize = size))
+                ModuleBridge.setClockSize(context, size)
             },
         )
         // The spring the whole transition runs on. The number is miuix's response time in
@@ -448,14 +459,14 @@ private fun CardGroup(
     }
 }
 
-/** The collapsed clock's height in dp, matching DEFAULT_CLOCK_HEIGHT_DP in the module. */
-private const val CLOCK_HEIGHT_MIN_DP = 20f
-/**
- * Where the clock slider stops when there is no measured clock to take a size from - the module
- * has not reported one, or the style it reported draws no glyphs. A measured one gives its own
- * height instead, which is the real top of the range.
- */
-private const val CLOCK_HEIGHT_MAX_DP = 64f
+/** The date-and-clock offset's range in dp, matching CLOCK_OFFSET_MIN/MAX_DP in the module. */
+private const val CLOCK_OFFSET_MIN_DP = -60f
+private const val CLOCK_OFFSET_MAX_DP = 300f
+
+/** The clock size's floor, matching CLOCK_SIZE_MIN in the module. */
+private const val CLOCK_SIZE_MIN = 0.05f
+/** Where the size thumb sits before the module has said what the clock is at. */
+private const val DEFAULT_CLOCK_SIZE = 0.3f
 
 /**
  * The clock transition's spring response, in seconds, matching CLOCK_RESPONSE_MIN/MAX in the
@@ -481,6 +492,7 @@ internal fun ValueSlider(
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     enabled: Boolean,
+    label: (Float) -> String = ::format,
     onValueChange: (Float) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth()) {
@@ -490,7 +502,7 @@ internal fun ValueSlider(
             enabled = enabled,
             endActions = {
                 MiuixText(
-                    text = format(value),
+                    text = label(value),
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
@@ -517,6 +529,7 @@ private fun clockGeometryOf(state: ModuleBridge.State) = ModuleBridge.Geometry(
     clockPad = state.geometry.clockPad,
     clockX = state.geometry.clockX,
     clockPivotX = state.geometry.clockPivotX,
+    clockFull = state.geometry.clockFull,
 )
 
 /**

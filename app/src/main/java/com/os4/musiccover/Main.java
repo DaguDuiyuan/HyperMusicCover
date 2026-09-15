@@ -364,6 +364,24 @@ public class Main extends XposedModule {
      * was worth is the box it used to multiply, so it waits for the first one measured.
      */
     private static volatile float sClockLegacyK = Float.NaN;
+    /**
+     * The collapsed clock's size as a fraction of the style's own full-size clock - the one the
+     * lock screen shows with cover mode off, before any notification squeezes it. 1 = unchanged.
+     *
+     * NaN until the slider is first moved, and then sClockHeightDp still decides: the default
+     * is the 36dp clock, and what fraction that is depends on the style, so it cannot be
+     * written down as one number.
+     */
+    static volatile float sClockSize = Float.NaN;
+    /** The smallest size the slider can ask for. */
+    static final float CLOCK_SIZE_MIN = 0.05f;
+    /**
+     * How far the date and the clock are moved together, in dp, from where cover mode puts
+     * them. Positive is down.
+     */
+    static volatile float sClockOffsetDp = 0f;
+    static final float CLOCK_OFFSET_MIN_DP = -60f;
+    static final float CLOCK_OFFSET_MAX_DP = 300f;
     private static volatile float sGlassEnd = DEFAULT_GLASS_END;
     /** The session we are mirroring, plus the callback that keeps the cover on the right track. */
     private static MediaController sWatched;
@@ -1406,7 +1424,7 @@ public class Main extends XposedModule {
         }
     }
 
-    private static void saveState() {
+    static void saveState() {
         if (sAppCtx == null) return;
         try {
             java.io.FileOutputStream f =
@@ -1417,6 +1435,11 @@ public class Main extends XposedModule {
                     // a confirmed box exists, and writing the default over it would lose the
                     // setting the user actually had.
                     + "\nclock=" + (Float.isNaN(sClockLegacyK) ? sClockHeightDp : sClockLegacyK)
+                    + (Float.isNaN(sClockSize) ? "" : "\nclocksize=" + sClockSize)
+                    + "\nclockoff=" + sClockOffsetDp
+                    // A measurement, like cardrect: the full clock the size is a fraction of.
+                    + (ClockCollapse.fullUnitState() == null ? ""
+                            : "\nclockfull=" + ClockCollapse.fullUnitState())
                     + "\nglass=" + sGlassEnd
                     + "\nspring=" + sClockResponse
                     + "\nmcart=" + (sMcHideArt ? 1 : 0)
@@ -1477,6 +1500,9 @@ public class Main extends XposedModule {
                     // "auto" was a stored setting; following the card is unconditional now.
                     else if ("bias".equals(k)) sBias = Float.parseFloat(v);
                     else if ("clock".equals(k)) setClockHeightDp(Float.parseFloat(v));
+                    else if ("clocksize".equals(k)) setClockSize(Float.parseFloat(v));
+                    else if ("clockoff".equals(k)) setClockOffsetDp(Float.parseFloat(v));
+                    else if ("clockfull".equals(k)) ClockCollapse.restoreFullUnit(v);
                     else if ("glass".equals(k)) sGlassEnd = Float.parseFloat(v);
                     // Through the setter, the way "clock" is: the clamp and the push to the
                     // wallpaper process are both part of reading the value back.
@@ -1716,6 +1742,14 @@ public class Main extends XposedModule {
                         saveState();
                         // A settled clock has no frames left to carry a new size on; ask for one.
                         ClockCollapse.refresh();
+                    } else if ("clocksize".equals(op)) {
+                        setClockSize(i.getFloatExtra("v", 1f));
+                        saveState();
+                        ClockCollapse.refresh();
+                    } else if ("clockoffset".equals(op)) {
+                        setClockOffsetDp(i.getFloatExtra("v", 0f));
+                        saveState();
+                        ClockCollapse.refresh();
                     } else if ("glassend".equals(op)) {
                         sGlassEnd = clamp01(i.getFloatExtra("v", DEFAULT_GLASS_END));
                         saveState();
@@ -1816,6 +1850,8 @@ public class Main extends XposedModule {
                         out.putBoolean("auto", sAuto);
                         out.putFloat("bias", sBias);
                         out.putFloat("clock", sClockHeightDp);
+                        out.putFloat("clocksize", effectiveClockSize());
+                        out.putFloat("clockoff", sClockOffsetDp);
                         out.putFloat("glass", sGlassEnd);
                         out.putFloat("spring", sClockResponse);
                         // The whole shade settings page, generated from the one key list so a new
@@ -1855,6 +1891,7 @@ public class Main extends XposedModule {
                             out.putFloat("clockpad", CLOCK_PAD);
                             out.putFloat("clockx", cg[3]);
                             out.putFloat("clockpivotx", cg[4]);
+                            out.putFloat("clockfull", clockFullRatio());
                         }
                         // Outside the block above: it is a property of the STYLE, not of the
                         // measurement, and the app needs it even on a frame where the clock
@@ -2749,6 +2786,45 @@ public class Main extends XposedModule {
         sClockLegacyK = Float.NaN;
         sClockHeightDp = v > CLOCK_HEIGHT_MAX_DP ? CLOCK_HEIGHT_MAX_DP : v;
         Xp.log(TAG + "clock height = " + sClockHeightDp + "dp");
+    }
+
+    /** The clock size as a fraction of the style's full clock. NaN = follow sClockHeightDp. */
+    private static void setClockSize(float v) {
+        if (Float.isNaN(v) || v <= 0f) {
+            sClockSize = Float.NaN;
+        } else {
+            sClockSize = v < CLOCK_SIZE_MIN ? CLOCK_SIZE_MIN : (v > 1f ? 1f : v);
+        }
+        Xp.log(TAG + "clock size = " + sClockSize);
+    }
+
+    private static void setClockOffsetDp(float v) {
+        if (Float.isNaN(v)) v = 0f;
+        sClockOffsetDp = v < CLOCK_OFFSET_MIN_DP ? CLOCK_OFFSET_MIN_DP
+                : (v > CLOCK_OFFSET_MAX_DP ? CLOCK_OFFSET_MAX_DP : v);
+        Xp.log(TAG + "clock offset = " + sClockOffsetDp + "dp");
+    }
+
+    /**
+     * The size the collapsed clock is at right now, as a fraction of the style's full clock -
+     * the slider's value, or what the dp default comes to on this style. NaN with no clock.
+     */
+    /** How many times the glyphs drawn now must grow to be the style's full clock. */
+    static float clockFullRatio() {
+        RectF box = glyphBox();
+        if (box == null || box.height() <= 0f) return 1f;
+        return ClockCollapse.fullRatio(glyphUnit(box));
+    }
+
+    static float effectiveClockSize() {
+        if (!Float.isNaN(sClockSize)) return sClockSize;
+        RectF box = glyphBox();
+        if (box == null || box.height() <= 0f) return Float.NaN;
+        float unit = glyphUnit(box);
+        float full = unit * ClockCollapse.fullRatio(unit);
+        if (!(full > 0f)) return Float.NaN;
+        float s = sClockHeightDp * density() / full;
+        return s < CLOCK_SIZE_MIN ? CLOCK_SIZE_MIN : (s > 1f ? 1f : s);
     }
 
     /**
@@ -3924,6 +4000,8 @@ public class Main extends XposedModule {
           .append(" lastSystem=").append(r1(sLastSystemY))
           .append("\nclock: ").append(ClockCollapse.describe()).append('\n')
           .append(" clockH=").append(r1(sClockHeightDp)).append("dp")
+          .append(" size=").append(Float.isNaN(sClockSize) ? "dp" : r3(sClockSize))
+          .append(" offset=").append(r1(sClockOffsetDp)).append("dp")
           .append(" response=").append(r2(sClockResponse)).append("s")
           .append(" fades=").append(fadeMsFor(sClockResponse)).append("ms")
           // Whether the app's glass slider is live at all: the morph exists only on the styles
@@ -4304,6 +4382,9 @@ public class Main extends XposedModule {
             out.putFloat("clockx", cg[3]);
             out.putFloat("clockpivotx", cg[4]);
             out.putFloat("clockpad", CLOCK_PAD);
+            out.putFloat("clockfull", clockFullRatio());
+            // For a size the slider has never set: the dp default, in this style's terms.
+            out.putFloat("clocksize", effectiveClockSize());
         }
         out.putBoolean("clockglass", clockHasGlass());
         if (diag != null) {

@@ -22,6 +22,9 @@ object SettingsBackup {
     private const val KEY_CLOCK_HEIGHT = "clockHeight"
     /** Written by versions that stored the collapse as a scale coefficient; read, never written. */
     private const val KEY_CLOCK_SCALE = "clockScale"
+    /** The size as a fraction of the style's full clock; absent while the slider was never set. */
+    private const val KEY_CLOCK_SIZE = "clockSizeFraction"
+    private const val KEY_CLOCK_OFFSET = "clockOffset"
     private const val KEY_CLOCK_RESPONSE = "clockResponse"
     private const val KEY_GLASS_END = "glassEnd"
     private const val KEY_CARD_HIDE_ART = "cardHideArt"
@@ -40,6 +43,8 @@ object SettingsBackup {
         if (module.alive) {
             json.put(KEY_BIAS, module.bias.toDouble())
             json.put(KEY_CLOCK_HEIGHT, module.clockHeightDp.toDouble())
+            if (module.clockSize > 0f) json.put(KEY_CLOCK_SIZE, module.clockSize.toDouble())
+            json.put(KEY_CLOCK_OFFSET, module.clockOffsetDp.toDouble())
             json.put(KEY_CLOCK_RESPONSE, module.clockResponse.toDouble())
             json.put(KEY_GLASS_END, module.glassEnd.toDouble())
             json.put(KEY_CARD_HIDE_ART, module.mcHideArt)
@@ -71,6 +76,12 @@ object SettingsBackup {
                 else -> null
             }
             if (clock != null) ModuleBridge.setClockHeight(context, clock.toFloat())
+            if (obj.has(KEY_CLOCK_SIZE)) {
+                ModuleBridge.setClockSize(context, obj.getDouble(KEY_CLOCK_SIZE).toFloat())
+            }
+            if (obj.has(KEY_CLOCK_OFFSET)) {
+                ModuleBridge.setClockOffset(context, obj.getDouble(KEY_CLOCK_OFFSET).toFloat())
+            }
             if (obj.has(KEY_CLOCK_RESPONSE)) {
                 ModuleBridge.setClockResponse(context, obj.getDouble(KEY_CLOCK_RESPONSE).toFloat())
             }

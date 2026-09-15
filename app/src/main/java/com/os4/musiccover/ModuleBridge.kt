@@ -44,6 +44,13 @@ object ModuleBridge {
          */
         val clockHeightDp: Float = 36f,
         /**
+         * The collapsed clock's size as a fraction of the style's full clock, 1 = unchanged.
+         * The module reports what the clock is at even before the slider sets it; 0 = unknown.
+         */
+        val clockSize: Float = 0f,
+        /** How far the date and clock are moved together, in dp. Positive is down. */
+        val clockOffsetDp: Float = 0f,
+        /**
          * The cover transition's spring response, in seconds - how long the clock takes to
          * travel. Larger is slower.
          *
@@ -128,6 +135,11 @@ object ModuleBridge {
          */
         val clockX: Float = 0f,
         val clockPivotX: Float = 0f,
+        /**
+         * How many times the captured glyphs must be scaled to be the style's full clock - more
+         * than 1 when the OEM is squeezing them. 0 = not reported.
+         */
+        val clockFull: Float = 0f,
     ) {
         val hasScreen: Boolean get() = screenW > 0 && screenH > 0
         val hasCard: Boolean get() = cardW > 0 && cardH > 0
@@ -152,6 +164,12 @@ object ModuleBridge {
 
     fun setClockHeight(context: Context, dp: Float) =
         send(context, "clockscale") { putExtra("v", dp) }
+
+    fun setClockSize(context: Context, fraction: Float) =
+        send(context, "clocksize") { putExtra("v", fraction) }
+
+    fun setClockOffset(context: Context, dp: Float) =
+        send(context, "clockoffset") { putExtra("v", dp) }
 
     fun setGlassEnd(context: Context, v: Float) = send(context, "glassend") { putExtra("v", v) }
 
@@ -253,6 +271,8 @@ object ModuleBridge {
         val clockGeometry: Geometry? = null,
         /** See State.clockHasGlass - a property of the style, so it rides with every reply. */
         val clockHasGlass: Boolean = false,
+        /** See State.clockSize. */
+        val clockSize: Float = 0f,
         val left: Shot? = null,
         val right: Shot? = null,
     )
@@ -288,6 +308,7 @@ object ModuleBridge {
             right = shot(b, "sr"),
             clockGeometry = if (b.getFloat("clockw", 0f) > 0f) clockGeometry(b) else null,
             clockHasGlass = b.getBoolean("clockglass", false),
+            clockSize = sizeOf(b),
         )
     }
 
@@ -298,6 +319,7 @@ object ModuleBridge {
         clockPad = b.getFloat("clockpad", 0f),
         clockX = b.getFloat("clockx", 0f),
         clockPivotX = b.getFloat("clockpivotx", 0f),
+        clockFull = fullOf(b),
     )
 
     private fun artSlot(b: Bundle): ArtSlot? {
@@ -373,6 +395,8 @@ object ModuleBridge {
             auto = b.getBoolean("auto", false),
             bias = b.getFloat("bias", 0.34f),
             clockHeightDp = b.getFloat("clock", 36f),
+            clockSize = sizeOf(b),
+            clockOffsetDp = b.getFloat("clockoff", 0f),
             clockResponse = b.getFloat("spring", 0.38f),
             glassEnd = b.getFloat("glass", 0.75f),
             cardShowing = b.getBoolean("card", false),
@@ -401,9 +425,15 @@ object ModuleBridge {
                 clockPad = b.getFloat("clockpad", 0f),
                 clockX = b.getFloat("clockx", 0f),
                 clockPivotX = b.getFloat("clockpivotx", 0f),
+                clockFull = fullOf(b),
             ),
         )
     }
+
+    /** The module sends NaN for a size it could not work out; that is 0 here. */
+    private fun sizeOf(b: Bundle): Float = b.getFloat("clocksize", 0f).let { if (it > 0f) it else 0f }
+
+    private fun fullOf(b: Bundle): Float = b.getFloat("clockfull", 0f).let { if (it > 0f) it else 0f }
 
     /** Restarting SystemUI is how most module changes are picked up. Needs root. */
     fun restartSystemUi(): Boolean = kill("com.android.systemui")

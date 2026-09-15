@@ -146,6 +146,7 @@ final class ClockCollapse {
         }
         float natural = naturalY();
         float floor = floorY(natural);
+        sFullUnit = Float.NaN;
         prepareGlass();
         install();
         if (!animate || Main.sContainer == null) {
@@ -154,7 +155,7 @@ final class ClockCollapse {
             sExitToAod = false;
             sT = 1f;
             sTv = 0f;
-            hold(floor);
+            hold(targetY(floor, natural));
             Main.setCardProgressFrom(1f);
             sGlassP = 1f;
             invalidate();
@@ -167,6 +168,7 @@ final class ClockCollapse {
             sFromDate = sAodDate;
         } else {
             captureFrom();
+            if (was == Phase.OFF && !wake && !Float.isNaN(sFromTop)) noteNaturalUnit(LIVE.unit);
             if (was == Phase.OFF && !wake && !Float.isNaN(sFromDate) && LIVE.date != null) {
                 sDateAnchor = sFromDate;
                 sDateAnchorView = LIVE.date;
@@ -177,9 +179,11 @@ final class ClockCollapse {
         sGlassFrom = sGlassP;
         sGlassTo = 1f;
         sYFrom = currentY(natural);
-        sYTo = floor;
+        sYTo = targetY(floor, natural);
         sExitToAod = false;
-        start(Phase.ENTER);
+        // A wake already lands with a give of its own (the OEM's glyphs settle as the lock screen
+        // arrives); the toggle does not, so it gets it from the spring.
+        start(Phase.ENTER, wake ? Main.EASE_COVER[0] : TOGGLE_ZETA);
         Xp.log(TAG + "clock: enter" + (wake ? " from the AOD" : "") + " y " + Main.r1(sYFrom)
                 + " -> " + Main.r1(sYTo) + " from " + was);
     }
@@ -201,7 +205,7 @@ final class ClockCollapse {
         sYFrom = currentY(natural);
         sYTo = natural;
         sExitToAod = false;
-        start(Phase.EXIT);
+        start(Phase.EXIT, TOGGLE_ZETA);
         Xp.log(TAG + "clock: exit y " + Main.r1(sYFrom) + " -> " + Main.r1(sYTo));
     }
 
@@ -295,6 +299,8 @@ final class ClockCollapse {
     static void refresh() {
         if (!active()) return;
         prepareGlass();
+        // A new size can mean a different y: the OEM draws its own glyphs at that height.
+        if (sPhase == Phase.ON && !Float.isNaN(sFloor)) hold(targetY(sFloor, naturalY()));
         invalidate();
     }
 
@@ -306,7 +312,7 @@ final class ClockCollapse {
             // A rebuilt keyguard is a new clock that has never been told the hold.
             float f = floorY(naturalY());
             Main.sHoldY = null;
-            hold(f);
+            hold(targetY(f, naturalY()));
         }
         invalidate();
     }
@@ -365,6 +371,45 @@ final class ClockCollapse {
             return;
         }
         Main.applyY(y);
+    }
+
+    /**
+     * The OEM height the size setting asks for, in the OEM's own timeHeight units: a fraction of
+     * adaptTimeHeight. NaN when no size is set - the dp default is small enough that the floor
+     * is always right for it.
+     */
+    private static float wantedOemHeight(float max) {
+        float s = Main.sClockSize;
+        return Float.isNaN(s) || !(max > 0f) ? Float.NaN : s * max;
+    }
+
+    /**
+     * The y to hold the OEM at for the size that is set.
+     *
+     * The squeeze is not a uniform shrink - the variable font changes width and weight as the
+     * height drops, and at the floor the digits are relatively much wider than at full size - so
+     * scaling a floor-sized clock back up to 100% gives the right height and the wrong width.
+     * Instead the OEM is walked only as far as it takes to draw its own glyphs at the height
+     * asked for, and the pre-draw scale covers what is left. Above the floor the OEM's height
+     * rises one for one with y, so that y is floor + (wanted - min), and never past natural.
+     */
+    private static float targetY(float floor, float natural) {
+        if (Float.isNaN(floor)) return floor;
+        View c = Main.sContainer;
+        if (c == null) return floor;
+        try {
+            Object it = Xp.getObjectField(c, "keyguardClockNotifInteractor");
+            if (it == null) return floor;
+            float min = num(Xp.getObjectField(it, "timeMinHeight"));
+            float max = num(Xp.getObjectField(it, "adaptTimeHeight"));
+            float want = wantedOemHeight(max);
+            if (Float.isNaN(want) || !(want > min + 0.5f)) return floor;
+            float y = floor + (Math.min(want, max) - min);
+            if (!Float.isNaN(natural) && y > natural) y = natural;
+            return y;
+        } catch (Throwable t) {
+            return floor;
+        }
     }
 
     /** The smallest change of the OEM's y worth a notifStateChange. */
@@ -526,22 +571,26 @@ final class ClockCollapse {
             float min = num(Xp.getObjectField(it, "timeMinHeight"));
             float max = num(Xp.getObjectField(it, "adaptTimeHeight"));
             float next = Float.NaN;
+            float want = wantedOemHeight(max);
             if (h > min + 0.5f && h < max - 0.5f) {
                 next = y - h + min;
                 sExactFloor = next;
                 sExactKey = layoutKey(it);
             } else if (h >= max - 0.5f && Math.abs(y - sYTo) < 1f && max > min
+                    && !(want >= max - 0.5f)
                     && num(Xp.getObjectField(res, "clockTranslationY")) > -0.5f) {
                 // Still at the top of its range and not being moved either: the knee is lower.
                 // A clock at the top of its range that IS being moved is a layout that does not
-                // squeeze at all, and walking further would only buy OEM recomputes.
+                // squeeze at all, and walking further would only buy OEM recomputes. A size that
+                // asks for the full height arrives at the top on purpose.
                 next = y - (max - min);
             }
-            if (!Float.isNaN(next) && next > 0f && Math.abs(next - sYTo) >= 1f) {
-                Xp.log(TAG + "clock: floor " + Main.r1(sYTo) + " -> " + Main.r1(next)
+            if (!Float.isNaN(next) && next > 0f
+                    && (Float.isNaN(sFloor) || Math.abs(next - sFloor) >= 1f)) {
+                Xp.log(TAG + "clock: floor " + Main.r1(sFloor) + " -> " + Main.r1(next)
                         + " (height " + Main.r1(h) + " at y=" + Main.r1(y) + ")");
-                sYTo = next;
                 sFloor = next;
+                sYTo = targetY(next, naturalY());
             }
         } catch (Throwable ignored) {
         }
@@ -595,15 +644,138 @@ final class ClockCollapse {
         return o instanceof Number ? ((Number) o).floatValue() : Float.NaN;
     }
 
+    /**
+     * The size setting's 100%: the row height of the clock the lock screen shows with cover mode
+     * off, measured - not derived - and remembered per clock style, across restarts.
+     *
+     * Two derivations failed on the phone. unit x adaptTimeHeight / timeHeight drifts a few
+     * percent with the held y (ink and timeHeight are not proportional under the variable font),
+     * which was a jump on landing; and "timeHeight == adaptTimeHeight means full height" is not
+     * true on the layouts whose height number never moves while the ink does, which stored a
+     * squeezed clock as the full one and made a wake's clock half the size of a toggle's. The
+     * only reading that is the full clock by definition is the OEM's own clock, untouched, at
+     * the moment cover mode takes it from the lock screen - so that is the one used.
+     */
+    private static volatile float sFullNatural = Float.NaN;
+    private static volatile String sFullStyle;
+    /** Until a measurement exists: one estimate per transition, so it cannot move mid-flight. */
+    private static float sFullUnit = Float.NaN;
+
+    private static String styleKey() {
+        View[] roots = Main.clockRoots();
+        for (View root : roots) {
+            if (root instanceof android.view.ViewGroup && ((android.view.ViewGroup) root).getChildCount() > 0) {
+                return ((android.view.ViewGroup) root).getChildAt(0).getClass().getName();
+            }
+        }
+        return null;
+    }
+
+    /** Called with the OEM's own lock screen clock, before anything of ours is on it. */
+    private static void noteNaturalUnit(float unit) {
+        String style = styleKey();
+        if (style == null || !(unit > 0f)) return;
+        // The largest seen: an entry can catch the OEM's clock still giving way to a notification,
+        // and that is a smaller clock, never a larger one.
+        if (style.equals(sFullStyle) && unit < sFullNatural + 0.5f) return;
+        Xp.log(TAG + "clock: full unit measured " + Main.r1(unit) + " for " + style
+                + " (was " + Main.r1(sFullNatural) + " for " + sFullStyle + ")");
+        sFullStyle = style;
+        sFullNatural = unit;
+        Main.saveState();
+    }
+
+    /** For the state file: "style|unit", or null. */
+    static String fullUnitState() {
+        return sFullStyle == null || Float.isNaN(sFullNatural) ? null
+                : sFullStyle + "|" + sFullNatural;
+    }
+
+    static void restoreFullUnit(String v) {
+        int bar = v.lastIndexOf('|');
+        if (bar <= 0) return;
+        try {
+            sFullNatural = Float.parseFloat(v.substring(bar + 1));
+            sFullStyle = v.substring(0, bar);
+        } catch (NumberFormatException ignored) {
+        }
+    }
+
+    /** How many times the glyphs drawn now must grow to be the full clock, for the app. */
+    static float fullRatio(float unitNow) {
+        if (!(unitNow > 0f)) return 1f;
+        String style = styleKey();
+        if (style != null && style.equals(sFullStyle) && !Float.isNaN(sFullNatural)) {
+            return sFullNatural / unitNow;
+        }
+        return oemGrowth();
+    }
+
+    private static float fullUnitFor(Phase phase, Live m) {
+        String style = styleKey();
+        if (style != null && style.equals(sFullStyle) && !Float.isNaN(sFullNatural)) {
+            return sFullNatural;
+        }
+        if (!Float.isNaN(sFullUnit)) return sFullUnit;
+        float live = m.unit * oemGrowth();
+        if (phase == Phase.ON || phase == Phase.EXIT) sFullUnit = live;
+        return live;
+    }
+
+    /**
+     * How many times taller the OEM's clock is at full size than it is being drawn now:
+     * adaptTimeHeight over timeHeight. 1 on the layouts whose squeeze is only a translation.
+     *
+     * timeHeight is not the ink height (502 against 423 once), so it is used only as a ratio,
+     * against itself - the ink box is what gets multiplied.
+     */
+    static float oemGrowth() {
+        View c = Main.sContainer;
+        if (c == null) return 1f;
+        try {
+            Object it = Xp.getObjectField(c, "keyguardClockNotifInteractor");
+            Object res = it == null ? null : Xp.getObjectField(it, "clockResult");
+            if (res == null) return 1f;
+            float h = num(Xp.getObjectField(res, "timeHeight"));
+            float max = num(Xp.getObjectField(it, "adaptTimeHeight"));
+            if (!(h > 0f) || !(max > h)) return 1f;
+            return max / h;
+        } catch (Throwable t) {
+            return 1f;
+        }
+    }
+
+    /** Whether v is drawn inside ancestor, and so already moves with it. */
+    private static boolean inside(View v, View ancestor) {
+        for (android.view.ViewParent p = v.getParent(); p instanceof View; p = p.getParent()) {
+            if (p == ancestor) return true;
+        }
+        return false;
+    }
+
     // ------------------------------------------------------------------ the spring
 
+    /**
+     * The damping of a toggle between the big and small clock. Below the OEM's 0.88, so the clock
+     * goes a little past its size and comes back - about 3% of the travel, measured against a
+     * wake, whose clock arrives a few percent small and grows the last of the way on its own.
+     */
+    private static final float TOGGLE_ZETA = 0.74f;
+
+    /** How far the spring has ever got this transition: the OEM's y follows this, never a bounce. */
+    private static float sTPeak;
+
     private static void start(Phase p) {
+        start(p, Main.EASE_COVER[0]);
+    }
+
+    private static void start(Phase p, final float zeta) {
         stopFrame();
         perfReset();
         sPhase = p;
         sT = 0f;
         sTv = 0f;
-        final float zeta = Main.EASE_COVER[0];
+        sTPeak = 0f;
         final float response = Main.sClockResponse;
         final float w0 = (float) (2 * Math.PI / response);
         final float k = w0 * w0;
@@ -634,7 +806,10 @@ final class ClockCollapse {
                 sPerfN++;
                 if (!Float.isNaN(sYFrom) && !Float.isNaN(sYTo)) {
                     long y0 = System.nanoTime();
-                    float y = done ? sYTo : sYFrom + (sYTo - sYFrom) * Math.min(1f, sT);
+                    // Monotonic: the bounce is the pose's. Walking the OEM back would re-shape
+                    // its glyphs and cost a relayout per frame for nothing.
+                    sTPeak = Math.max(sTPeak, sT);
+                    float y = done ? sYTo : sYFrom + (sYTo - sYFrom) * Math.min(1f, sTPeak);
                     if (done && Main.sHoldY != null && Main.sHoldY != y) Main.sHoldY = null;
                     hold(y);
                     refineFloor(y);
@@ -913,7 +1088,7 @@ final class ClockCollapse {
             // Settled before the floor could be read - a restore at startup, before the keyguard
             // existed. The OEM has laid out by now, so read it and hold there.
             float f = floorY(naturalY());
-            if (!Float.isNaN(sFloor)) hold(f);
+            if (!Float.isNaN(sFloor)) hold(targetY(f, naturalY()));
         }
         if (phase != Phase.ON && Float.isNaN(sFromTop)) {
             // Nothing was measurable when the transition started. The pose on screen now is the
@@ -926,17 +1101,20 @@ final class ClockCollapse {
 
         // The cover pose, live.
         float d = Main.density();
-        float k = Main.sClockHeightDp * d / m.unit;
-        if (k > 1f) k = 1f;
-        if (k < Main.MIN_CLOCK_K) k = Main.MIN_CLOCK_K;
-        float coverUnit = k * m.unit;
+        float full = fullUnitFor(phase, m);
+        float size = Main.sClockSize;
+        float coverUnit = Float.isNaN(size) ? Main.sClockHeightDp * d : size * full;
+        if (coverUnit > full) coverUnit = full;
+        if (coverUnit < Main.MIN_CLOCK_K * full) coverUnit = Main.MIN_CLOCK_K * full;
+        // The date and the clock move as one block.
+        float offset = Main.sClockOffsetDp * d;
         float coverDate, coverTop;
         if (m.anchored) {
-            coverDate = coverDateY(m.date);
+            coverDate = coverDateY(m.date) + offset;
             coverTop = coverDate + m.dateH + Main.CLOCK_GAP_DP * d;
         } else {
-            coverDate = m.dateTop;
-            coverTop = m.inkTop;
+            coverDate = m.dateTop + offset;
+            coverTop = m.inkTop + offset;
         }
 
         // Notifications. The OEM squeezes its full clock out of their way - down to its minimum
@@ -992,7 +1170,10 @@ final class ClockCollapse {
             float ty = top - (parentTop(g) + g.getTop() + m.box.top);
             if (Math.abs(g.getTranslationY() - ty) >= 0.25f) g.setTranslationY(ty);
         }
-        if (m.anchored && m.date != null && !Float.isNaN(date)) {
+        // The other styles lay their own date out, and it is only moved to follow the offset -
+        // unless it sits inside the clock, which carries it already.
+        if (m.date != null && !Float.isNaN(date)
+                && (m.anchored || !inside(m.date, firstTarget()))) {
             float dty = date - m.dateTop;
             if (Math.abs(m.date.getTranslationY() - dty) >= 0.25f) m.date.setTranslationY(dty);
         }

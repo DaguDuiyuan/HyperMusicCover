@@ -17,7 +17,9 @@
     <string name="cover_bias_summary">0 is flush with the top, 0.5 is centred</string>
     <string name="clock_section">Clock</string>
     <string name="clock_height">Clock height</string>
-    <string name="clock_height_summary">How tall the collapsed digits are, in dp</string>
+    <string name="clock_height_summary">Moves the date and clock together; positive is down</string>
+    <string name="clock_size">Clock size</string>
+    <string name="clock_size_summary">Relative to the full clock; 100% means no shrink</string>
     <string name="clock_response">Scale animation damping</string>
     <string name="clock_response_summary">0.38 by default, higher feels more damped</string>
     <string name="clock_glass">Glass strength</string>
