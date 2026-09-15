@@ -134,51 +134,12 @@
     <!-- The features page is a list of cards, each opening a page of its own. -->
     <string name="features_cover_title">Lockscreen music cover</string>
     <string name="features_cover_summary">Cover, clock, media card</string>
-    <string name="features_shade_title">Notification centre</string>
-    <string name="features_shade_summary">The cover behind a pull-down, and how it feels</string>
+    <string name="features_shade_title">Shade and control centre</string>
+    <string name="features_shade_summary">Flowing light</string>
 
+    <string name="shade_enabled">Enable flowing light</string>
     <string name="shade_section_behaviour">Behaviour</string>
     <string name="shade_mode">When it applies</string>
-    <string name="shade_mode_summary">What a pull-down does with no music playing</string>
-    <string name="shade_mode_cover">Only in cover mode</string>
-    <string name="shade_mode_always">Always, wallpaper when there is no music</string>
-    <string name="shade_mode_feel">Always, feel only</string>
-    <string name="shade_gate">Hold the notifications back</string>
-    <string name="shade_gate_summary">A pull that has barely started shows nothing, until the first tenth</string>
-    <string name="shade_cardblur">Cards sample the cover</string>
-    <string name="shade_cardblur_summary">Off, they sample the app behind the shade</string>
-    <string name="shade_cardradius">Card blur radius</string>
-    <string name="shade_touch">Edge follows the finger</string>
-    <string name="shade_touch_summary">Off, the panel drives it - and the panel moves about nine times faster</string>
-
-    <string name="shade_section_spring">Spring</string>
-    <string name="shade_stiffness">Blur stiffness</string>
-    <string name="shade_stiffness_summary">Lower trails further behind</string>
-    <string name="shade_damping">Blur damping</string>
-    <string name="shade_damping_summary">1.00 is critically damped</string>
-    <string name="shade_curtainstiffness">Settle stiffness</string>
-    <string name="shade_curtainstiffness_summary">How fast the cover returns after a release</string>
-    <string name="shade_curtaindamping">Settle damping</string>
-    <string name="shade_blursat">Blur saturation</string>
-    <string name="shade_blursat_summary">How far to pull before it is fully blurred</string>
-
-    <string name="shade_section_curtain">Curtain and cover</string>
-    <string name="shade_deadzone">Dead zone</string>
-    <string name="shade_deadzone_summary">Nothing is drawn within this much of the travel</string>
-    <string name="shade_alphaend">Fade-in end</string>
-    <string name="shade_alphaend_summary">How far to pull before the cover is fully opaque</string>
-    <string name="shade_wprise">Initial rise</string>
-    <string name="shade_wprise_summary">How far above its resting place the cover starts</string>
-    <string name="shade_wpblur">Cover blur</string>
-    <string name="shade_wpblur_summary">The cover\'s own blur radius while it is soft</string>
-    <string name="shade_sharpstart">Sharpening point</string>
-    <string name="shade_sharpstart_summary">Where it starts clearing; 1000 keeps it blurred throughout</string>
-    <string name="shade_contentpush">Push content down</string>
-    <string name="shade_contentpush_summary">Moves the media card and the notifications down together, uncovering a clear band of cover above them; 0 leaves it alone</string>
-    <string name="shade_clockpush">Clock and date up/down</string>
-    <string name="shade_clockpush_summary">Negative moves it up, positive down; the control centre\'s own clock and date only</string>
-    <string name="shade_carrierpush">Carriers up/down</string>
-    <string name="shade_carrierpush_summary">Negative moves it up, positive down; both carriers and the divider between them</string>
-    <string name="shade_shadebias">Cover position</string>
-    <string name="shade_shadebias_summary">Shifts the framing from the lock screen\'s; negative up, positive down. 0 is exactly the lock screen\'s, and costs no extra memory</string>
+    <string name="shade_mode_restore">System default</string>
+    <string name="shade_mode_keep">Keep the album cover</string>
 </resources>

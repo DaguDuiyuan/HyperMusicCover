@@ -104,35 +104,6 @@ public class Main extends XposedModule {
             + "$nsslLockYPosition_delegate$lambda";
     private static final String AVOID_SUFFIX = "$$inlined$combine$1$3";
 
-    /**
-     * The shade's per-frame progress, and the property it is written through.
-     *
-     * `expansion` is 0 with the panel shut and 1 wide open, and it is the only quantity in the
-     * shade that tracks the finger. The module this layer is ported from reached it through
-     * `FloatFlowProperty.setValue` rather than through the animator, because the animator on
-     * that build was a FloatFlowProperty that did not declare a `setValue` of its own -
-     * confirmed on OS4 as well, see the dump in the plan. Hooking the base class therefore
-     * catches it, and the filter below keeps every other Folme property in SystemUI out.
-     */
-    private static final String CLS_FLOAT_FLOW = "com.miui.systemui.util.FloatFlowProperty";
-    /**
-     * MIUI's per-window shade blur. Three are built - window, notification panel, control
-     * centre - and only the first is the background this module replaces. See ShadeBlur.
-     */
-    private static final String CLS_BLUR_PROVIDER =
-            "com.miui.systemui.shade.blur.ShadeBlendBlurController$BlurProvider";
-    /** Where every notification row gets its material; see the card-blur note in ShadeLayer. */
-    private static final String CLS_NOTIF_UTIL =
-            "com.android.systemui.statusbar.notification.utils.NotificationUtil";
-    private static final String CLS_EXPANSION_ANIMATOR =
-            "com.android.systemui.shade.NotificationPanelExpansionAnimator";
-    /** The shade's controller and its touch handler, for the finger-following curtain. */
-    private static final String CLS_PANEL_CONTROLLER =
-            "com.android.systemui.shade.NotificationPanelViewController";
-    private static final String CLS_PANEL_TOUCH = CLS_PANEL_CONTROLLER + "$TouchHandler";
-    /** Resolved once; the per-frame comparison is identity, not a name string. */
-    private static volatile Class<?> sExpansionCls;
-
     /** SystemUI's own keyguard wallpaper manager, for the wallpaper type. See wallpaperKind(). */
     private static volatile Object sKgWallpaperMgr;
     /**
@@ -148,22 +119,6 @@ public class Main extends XposedModule {
     private static volatile View sVideoBg;
     /** The bitmap currently on sCover, ours to recycle when it is replaced. */
     private static volatile Bitmap sCoverBitmap;
-
-    /**
-     * The composed cover the notification shade draws, and the one it is replacing.
-     *
-     * Deliberately NOT the same object as sCoverBitmap. That one belongs to the live-wallpaper
-     * cover view, which detachCover() recycles on every keyguard rebuild; sharing it would blank
-     * the shade for a frame each time. The cost of not sharing is a second full-screen bitmap on
-     * the video path only (12.5MB -> 25MB), which is worth paying for an ownership rule with no
-     * cases in it.
-     *
-     * setShadeArt() below is the ONLY writer and the ONLY recycler of either of these. Nothing
-     * else in this file may call recycle() on them.
-     */
-    private static volatile Bitmap sShadeArt;
-    /** Retired, held for a couple of frames so nothing is drawing it when it goes. */
-    private static volatile Bitmap sShadeRetired;
 
     static volatile View sContainer;
     private static volatile Class<?> sContainerCls;
@@ -394,18 +349,6 @@ public class Main extends XposedModule {
      */
     private static final float DEFAULT_BIAS = 0.34f;
     private static volatile float sBias = DEFAULT_BIAS;
-
-    /**
-     * The notification centre's cover framing, as a DELTA on {@link #sBias} in milli-units.
-     *
-     * A delta rather than a bias of its own, and the choice is the whole design: zero means "the
-     * same framing as the lock screen", which is both the default and the only case that costs
-     * nothing at all - see shadePicture(). Anything else needs its own full-screen bitmap,
-     * because the framing is baked in at COMPOSE time (composeWallpaper places the sharp band at
-     * `(h - coverH) * bias`) and no transform on the layer can reproduce it without also
-     * changing the picture's scale.
-     */
-    private static volatile int sShadeBiasDelta = 0;
 
     /**
      * Cover mode follows the media card. Not a setting: with it off the module does nothing at
@@ -753,10 +696,10 @@ public class Main extends XposedModule {
                 // wallpaper it was covering is hidden, so losing it without putting it back
                 // leaves the lock screen blank. Re-compose rather than re-show the old view:
                 // the track may have moved on while the screen was off.
-                // ... and the shade's copy of the cover has to be recomposed for the same
-                // reason even on the image path, where nothing else would notice it had gone:
-                // sShadeArt is a static, so a restart takes it and only this puts it back.
-                if (sCoverMode && (sVideoWallpaper || sShadeArt == null)) {
+                // ... and the shade's background has to be rebuilt for the same reason even on
+                // the image path, where nothing else would notice it had gone: it is static, so
+                // a restart takes it and only this puts it back.
+                if (sCoverMode && (sVideoWallpaper || !ShadeLayer.hasArt())) {
                     if (sVideoWallpaper) sCover = null;
                     pushArtAsync(true, false);
                 }
@@ -1089,195 +1032,8 @@ public class Main extends XposedModule {
             Xp.log(TAG + "lock screen tap hook failed: " + t);
         }
 
-        // The shade's cover layer - the album cover behind the notification panel, revealed by
-        // a pull-down. Hooked on the CONSTRUCTOR and not on the dispatchTouchEvent above: that
-        // hook only fires once a finger is already down, which is far too late to build a view
-        // in. Same class, different method, and deliberately its own try/catch: a shade window
-        // that cannot be found costs this feature and nothing else.
-        //
-        // Read the ShadeLayer header before touching this. The layer must end up immediately
-        // below NotificationPanelView or MIUI's own scrims paint over it, and it must never be
-        // made clickable, or it eats the swipe-to-unlock.
-        try {
-            Class<?> shadeRoot = Xp.findClass(
-                    "com.android.systemui.shade.NotificationShadeWindowView", cl);
-            Xp.hookAllConstructors(shadeRoot, chain -> {
-                Object result = chain.proceed();
-                ShadeLayer.onWindowRoot(chain.getThisObject());
-                return result;
-            });
-            Xp.log(TAG + "shade window hooked for the cover layer");
-        } catch (Throwable t) {
-            Xp.log(TAG + "shade cover layer hook failed, pulling the shade will show no cover: "
-                    + t);
-        }
-
-        // The per-frame driver for everything the shade layer draws.
-        //
-        // Matched by Class identity and NOT by a name string. The module this is ported from
-        // compared `getClass().getName()` against a literal on every frame of every Folme
-        // animation in SystemUI - which is one rename away from receiving no frames at all,
-        // with a hook that installs cleanly and reports nothing.
-        //
-        // Its own try/catch, and the loudest message in the feature: if this one is missing
-        // the layer can still be placed but nothing can animate it.
-        try {
-            sExpansionCls = Xp.findClass(CLS_EXPANSION_ANIMATOR, cl);
-            Class<?> flow = Xp.findClass(CLS_FLOAT_FLOW, cl);
-            Xp.hookAll(flow, "setValue", chain -> {
-                Object result = chain.proceed();
-                if (chain.getThisObject().getClass() == sExpansionCls) {
-                    java.util.List<Object> a = chain.getArgs();
-                    Object v = a.size() > 1 ? a.get(1) : null;
-                    if (v instanceof Float) ShadeLayer.onExpansion((Float) v);
-                }
-                return result;
-            });
-            Xp.log(TAG + "shade expansion driver hooked (" + CLS_FLOAT_FLOW + ".setValue)");
-        } catch (Throwable t) {
-            Xp.log(TAG + "shade expansion driver NOT hooked - the cover layer can be placed but "
-                    + "nothing will animate it: " + t);
-        }
-
-        // The blur half: kill the background zoom, then drive the window blur from the spring.
-        //
-        // Two hooks on the same class, each with its own catch, because they cost different
-        // things: without the constructor one the picture still shrinks as it is pulled (a
-        // visible wrongness), and without the ratio one the blur just snaps instead of trailing.
-        try {
-            Class<?> provider = Xp.findClass(CLS_BLUR_PROVIDER, cl);
-
-            Xp.hookAllConstructors(provider, chain -> {
-                Object result = chain.proceed();
-                ShadeBlur.onProvider(chain.getThisObject());
-                return result;
-            });
-
-            // The argument is substituted, not the method. MIUI's own body still runs, so the
-            // glass-material ratio it computes inside is untouched - replacing the method
-            // wholesale is the version that leaves the shade's glass grey.
-            Xp.hookAll(provider, "setBlurRatio", chain -> {
-                if (ShadeBlur.isWindow(chain.getThisObject()) && ShadeLayer.driving()) {
-                    java.util.List<Object> a = chain.getArgs();
-                    if (a.size() == 1 && a.get(0) instanceof Float) {
-                        Object[] args = a.toArray();
-                        args[0] = Float.valueOf(ShadeLayer.ratio());
-                        return chain.proceed(args);
-                    }
-                }
-                return chain.proceed();
-            });
-            Xp.log(TAG + "shade blur provider hooked (" + CLS_BLUR_PROVIDER + ")");
-        } catch (Throwable t) {
-            Xp.log(TAG + "shade blur hook failed: " + t);
-        }
-
-        // The curtain follows the FINGER, not the panel's expansion.
-        //
-        // Measured on device without this: the edge ran several times ahead of the hand,
-        // because `expansion` is not proportional to how far the finger has travelled - pulling
-        // a little opens the panel a lot. The module this is ported from reaches for raw touch
-        // for exactly this reason, and its own notes record one false alarm about it: an
-        // apparent "rawY stops updating" turned out to be an `adb shell input motionevent`
-        // artefact, where each synthetic event is a separate process and only the DOWN reaches
-        // the handler. A real finger is fine.
-        //
-        // The handler is observed AFTER the original runs, so `isTracking()` describes this
-        // event rather than the previous one - and it is never overridden.
-        try {
-            Class<?> controller = Xp.findClass(CLS_PANEL_CONTROLLER, cl);
-            Xp.hookAllConstructors(controller, chain -> {
-                Object result = chain.proceed();
-                ShadeLayer.onPanelController(chain.getThisObject());
-                return result;
-            });
-
-            Class<?> touch = Xp.findClass(CLS_PANEL_TOUCH, cl);
-            Xp.hookAll(touch, "onTouchEvent", chain -> {
-                Object result = chain.proceed();
-                java.util.List<Object> a = chain.getArgs();
-                if (!a.isEmpty() && a.get(0) instanceof MotionEvent) {
-                    ShadeLayer.onTouch((MotionEvent) a.get(0));
-                }
-                return result;
-            });
-            Xp.log(TAG + "shade touch follow hooked (" + CLS_PANEL_TOUCH + ")");
-        } catch (Throwable t) {
-            Xp.log(TAG + "shade touch follow NOT hooked - the curtain will follow the panel's "
-                    + "expansion instead of the finger, and will run ahead of it: " + t);
-        }
-
-        // Card glass that samples the cover rather than the app behind the shade.
-        //
-        // Hooked here and not on the provider because a notification row has no blur radius of
-        // its own: applyElementViewBlend only calls setMiViewBlurMode(1), which REUSES the
-        // window-level blur - and that one samples what is behind the window, which is the app.
-        // Suppressing the window blur on the row therefore does nothing at all, and was the
-        // first two attempts at this in the module this is ported from. The row has to be given
-        // a blur of its own, which is what MiBlur.applyLocalBlur does.
-        //
-        // WHERE the write happens is the part that took three attempts, and it is not here.
-        //
-        // It was here, at prepare time, and that is what cost the lock screen its cards twice
-        // over: a row is the SAME view on the keyguard and in the notification centre, prepare
-        // time cannot tell which one it is being prepared for, and the material outlives the
-        // prepare. Measured on device: 21 rows written, all of them while the keyguard was up,
-        // and every one of them wrong there until the writes were taken back.
-        //
-        // This hook now only RECORDS which view the system considers a card's material - that
-        // choice is still the system's, and re-deriving it here would be the module inventing
-        // its own answer. The write moved to setCardBlurActive(), driven by the edges of the
-        // shade being open, which is the only moment in the module where "the notification
-        // centre is up" is answerable and where the tree is assembled enough to ask whether a
-        // view is under the panel. Asking that at prepare time is what failed twice.
-        //
-        // Behind a switch and off by default: it writes OEM blur material on every row, and a
-        // full-screen cover behind the cards is not obviously better than the app behind them.
-        try {
-            Class<?> notifUtil = Xp.findClass(CLS_NOTIF_UTIL, cl);
-            // Kept for rowClass(). The classloader a VIEW carries is the one that loaded ITS
-            // class, and the utility hands this hook framework views too - an ImageView's loader
-            // is the boot loader, which cannot see a single SystemUI class. Resolving the row
-            // class through it fails, rowOf() then answers null for everything, and the whole
-            // feature goes quiet without a single write being attempted. Measured: 15 failures
-            // and not one card touched.
-            sHostLoader = notifUtil.getClassLoader();
-            Xp.hookAll(notifUtil, "applyElementViewBlend", chain -> {
-                Object result = chain.proceed();
-                if (sBlendCalls.incrementAndGet() == 1) {
-                    Xp.log(TAG + "applyElementViewBlend is being called");
-                }
-                // Recorded, never written. The switch is asked at the sweep instead, so that
-                // turning it on does not have to wait for every row to be prepared again.
-                java.util.List<Object> a = chain.getArgs();
-                if (a.size() > 1 && a.get(1) instanceof View) {
-                    final View v = (View) a.get(1);
-                    // Recorded, and NOT written - the write is the sweep's, at the edges of the
-                    // shade being open. The scope here is only "could this ever be one of our
-                    // cards", because the finer question is unanswerable at prepare time:
-                    //
-                    //  - a heads-up notification is never ours to restyle, and it is a row, so
-                    //    it can be named and dropped here;
-                    //  - a row's material is the ordinary case;
-                    //  - a view with NO row used to be dropped, and that was wrong: the media
-                    //    card is not a notification row and its background is handed to this very
-                    //    method. Which of the row-less views is the media card is asked at the
-                    //    sweep, where the tree exists and can answer.
-                    final View row = rowOf(v);
-                    if (row == null) noteCandidate(v, null);
-                    else if (!isHeadsUp(row)) noteCandidate(v, row);
-                } else if (sBadArgs.incrementAndGet() == 1) {
-                    Xp.log(TAG + "applyElementViewBlend: no View in arg 1 ("
-                            + (a.size() > 1 && a.get(1) != null
-                                    ? a.get(1).getClass().getName() : "null") + ")");
-                }
-                return result;
-            });
-            Xp.log(TAG + "notification row material hooked");
-        } catch (Throwable t) {
-            Xp.log(TAG + "notification row material hook failed - the cards will keep sampling "
-                    + "the app behind the shade: " + t);
-        }
+        // The notification shade's cover background. Its hooks and logic are ShadeLayer's own.
+        ShadeLayer.install(cl);
 
         // The live container, and - on every clock style except the all_in_one family - the
         // only place the notification Y ever arrives.
@@ -1823,29 +1579,12 @@ public class Main extends XposedModule {
                         dumpNotifState();
                     } else if ("views".equals(op)) {
                         dumpViewTree(i.getBooleanExtra("root", false));
-                    } else if ("shadeprobe".equals(op)) {
-                        // Phase 1a: paint the shade's cover layer flat, so its placement can be
-                        // judged with no cover, no spring and no blur in the way.
-                        ShadeLayer.setProbe(i.getBooleanExtra("on", true));
-                    } else if ("shadedump".equals(op)) {
-                        Xp.log(TAG + "shade layer: " + ShadeLayer.describe());
                     } else if ("shadecfg".equals(op)) {
                         // One op for the whole settings page. The key is validated and the value
                         // clamped in ShadeLayer.configure, so adb and the UI go through exactly
                         // the same door.
                         ShadeLayer.configure(i.getStringExtra("key"), i.getIntExtra("v", 0));
                         saveState();
-                    } else if ("rows".equals(op)) {
-                        dumpNotifRows();
-                    } else if ("cand".equals(op)) {
-                        dumpCandidates();
-                    } else if ("blurscan".equals(op)) {
-                        dumpBlurScan();
-                    } else if ("blurclear".equals(op)) {
-                        clearCardBlur();
-                    } else if ("shade".equals(op)) {
-                        Xp.log(TAG + "shade: mode=" + ShadeLayer.mode()
-                                + " " + ShadeLayer.describe());
                     } else if ("query".equals(op)) {
                         // Answered through the ordered broadcast's result extras: the app is a
                         // separate process and this is the only channel it already has. A reply
@@ -1996,13 +1735,6 @@ public class Main extends XposedModule {
                 // Every one of these three changes the answer to one of the two cached readings,
                 // so the timer below is not what anyone waits on at the moments that matter.
                 forgetSysReads();
-                if (Intent.ACTION_WALLPAPER_CHANGED.equals(a)) {
-                    // Nothing else in this receiver is about the wallpaper, so this is the whole
-                    // of it: drop the cached copy the shade shows in mode 1. It reloads on the
-                    // next pull-down that wants it.
-                    invalidateShadeWallpaper();
-                    return;
-                }
                 if (Intent.ACTION_SCREEN_ON.equals(a)) sScreenOn = true;
                 else if (Intent.ACTION_SCREEN_OFF.equals(a)) {
                     sScreenOn = false;
@@ -2037,10 +1769,6 @@ public class Main extends XposedModule {
         lf.addAction(Intent.ACTION_SCREEN_OFF);
         lf.addAction(Intent.ACTION_SCREEN_ON);
         lf.addAction(Intent.ACTION_USER_PRESENT);
-        // Mode 1 caches the home wallpaper to reveal behind the shade. This is the only reliable
-        // notice that it is no longer the right picture - the user can change it from Settings,
-        // a theme or the wallpaper carousel, and nothing else this module hooks is involved.
-        lf.addAction(Intent.ACTION_WALLPAPER_CHANGED);
         ctx.registerReceiver(lifecycle, lf, Context.RECEIVER_NOT_EXPORTED);
         Xp.log(TAG + "lifecycle receiver registered (screen off / user present)");
     }
@@ -4807,119 +4535,6 @@ public class Main extends XposedModule {
     }
 
     /**
-     * The only writer, and the only recycler, of the shade layer's picture.
-     *
-     * Safe to call from the worker: the view swap is posted to the UI thread by
-     * {@link ShadeLayer#setArt}, and the bitmap is not freed here either.
-     *
-     * The old generation is retired rather than freed on the spot, because setArt() posts and a
-     * post is drawn on a later frame - the display list that still names the old bitmap is only
-     * gone after that. Two frames is the margin. A second replacement arriving sooner than that
-     * proves the frames went by, so the slot's previous occupant is freed then instead; without
-     * that, a fast skip through tracks would retire a bitmap and then overwrite the only
-     * reference to it, and a 12.5MB leak per skip is not a thing to ship.
-     */
-    private static void setShadeArt(final Bitmap b) {
-        final Bitmap old = sShadeArt;
-        if (old == b) return;
-        sShadeArt = b;
-        ShadeLayer.setArt(b);
-        if (old == null || old.isRecycled()) return;
-
-        final Bitmap prev = sShadeRetired;
-        sShadeRetired = old;
-        if (prev != null && prev != old && !prev.isRecycled()) prev.recycle();
-        main().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (sShadeRetired != old) return;
-                sShadeRetired = null;
-                if (!old.isRecycled()) old.recycle();
-            }
-        }, 32L);
-    }
-
-    private static void clearShadeArt() {
-        setShadeArt(null);
-    }
-
-    /**
-     * What the shade reveals in mode 1 when cover mode is off: the wallpaper that is actually
-     * behind it.
-     *
-     * The HOME wallpaper and not the lock one. The ported module used
-     * `MiuiKeyguardWallPaperManager.getKeyguardWallPaperPreview()`, which is the lock screen's -
-     * but the notification shade is pulled down over the desktop, where the wallpaper is a
-     * different picture most of the time. Revealing the lock wallpaper there would swap the
-     * thing the user is looking at for an unrelated photo.
-     *
-     * Owned by the same rules as sShadeArt: setShadeWallpaper() is the only writer and the only
-     * recycler.
-     */
-    private static volatile Bitmap sShadeWallpaper;
-    private static volatile Bitmap sShadeWallpaperRetired;
-    /** One load in flight at a time; the shade asks on every frame it has no picture. */
-    private static volatile boolean sShadeWpLoading;
-
-    /** Asked for by the shade layer when mode 1 wants a background and has none. */
-    static void requestShadeWallpaper() {
-        final Context ctx = sAppCtx;
-        if (ctx == null || sShadeWpLoading) return;
-        sShadeWpLoading = true;
-        worker().post(new Runnable() {
-            @Override
-            public void run() {
-                Bitmap b = null;
-                try {
-                    String kind = wallpaperKind(ctx, "home");
-                    if (kind == null || KIND_IMAGE.equals(kind)) {
-                        android.app.WallpaperManager wm = (android.app.WallpaperManager)
-                                ctx.getSystemService(Context.WALLPAPER_SERVICE);
-                        if (wm != null) b = homeWallpaper(wm);
-                    } else {
-                        // A live home wallpaper is not a picture anything can hold. homeWallpaper
-                        // would hand back a still of one frame, which is a lie the user sees as
-                        // the shade revealing something that is not on their screen.
-                        Xp.log(TAG + "shade wallpaper: the home wallpaper is " + kind
-                                + ", not an image - mode 1 will reveal nothing rather than a "
-                                + "still of it");
-                    }
-                } catch (Throwable t) {
-                    Xp.log(TAG + "shade wallpaper load failed: " + t);
-                }
-                sShadeWpLoading = false;
-                if (b == null) return;
-                setShadeWallpaper(b);
-                Xp.log(TAG + "shade wallpaper loaded " + b.getWidth() + "x" + b.getHeight());
-            }
-        });
-    }
-
-    private static void setShadeWallpaper(final Bitmap b) {
-        final Bitmap old = sShadeWallpaper;
-        if (old == b) return;
-        sShadeWallpaper = b;
-        ShadeLayer.setWallpaper(b);
-        if (old == null || old.isRecycled()) return;
-        final Bitmap prev = sShadeWallpaperRetired;
-        sShadeWallpaperRetired = old;
-        if (prev != null && prev != old && !prev.isRecycled()) prev.recycle();
-        main().postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (sShadeWallpaperRetired != old) return;
-                sShadeWallpaperRetired = null;
-                if (!old.isRecycled()) old.recycle();
-            }
-        }, 32L);
-    }
-
-    /** The wallpaper is not the one we cached any more. */
-    static void invalidateShadeWallpaper() {
-        setShadeWallpaper(null);
-    }
-
-    /**
      * Hands the album art to the wallpaper process. It cannot read the media session itself, and
      * a full-screen bitmap is far past the binder limit, so send it as a JPEG the size of the
      * screen - already composed here, where we know the screen metrics.
@@ -4955,10 +4570,11 @@ public class Main extends XposedModule {
             // Nothing behind the clock any more, so nothing to take a colour from. The repaint
             // that hands the OEM's own colours back happens with the rest of cover mode.
             sCoverTint = 0;
-            // The shade has nothing to reveal any more. This branch is the single funnel for
-            // leaving cover mode - the tap, the dismissed card, the release path and the cover
-            // op all end up here - so it is the only place the picture has to be dropped.
-            clearShadeArt();
+            // The shade has nothing to reveal any more - unless it is set to keep the last cover.
+            // This branch is the single funnel for leaving cover mode - the tap, the dismissed
+            // card, the release path and the cover op all end up here - so it is the only place
+            // the picture has to be dropped.
+            if (!ShadeLayer.keepsArt()) ShadeLayer.setArt(null);
             Xp.log(TAG + "pushart off");
             return;
         }
@@ -4995,7 +4611,9 @@ public class Main extends XposedModule {
                 }
                 measureCover(full);
                 if (sCoverMode) recolorClock();
-                setShadeArt(shadePicture(src, w, h, full));
+                full.recycle();
+                // The shade builds its background from the square source and keeps nothing.
+                ShadeLayer.setArt(src);
                 Xp.log(TAG + "pushart " + w + "x" + h + " bias=" + sBias + " as a "
                         + src.getWidth() + "x" + src.getHeight() + " source, sent in "
                         + (sent - t0) + "ms, own copy composed in "
@@ -5027,17 +4645,8 @@ public class Main extends XposedModule {
             jpg = bos.toByteArray();
             q -= 15;
         } while (jpg.length > 700 * 1024 && q > 25);
-        // Handed to the shade rather than freed. Everything above has finished with it - the
-        // measurement, the clock recolour and the JPEG loop all ran first - and this is the
-        // cheapest possible place for the notification shade's cover layer to get its picture:
-        // the bitmap already exists, and reusing it means a pull-down reveals exactly what the
-        // lock screen is showing, pixel for pixel.
-        //
-        // NOT a recycle any more, and it must never become one again. The layer draws this on
-        // SystemUI's UI thread every frame the shade is open; a bitmap recycled underneath it
-        // throws from inside BitmapDrawable.draw() and, unlike most of this module's failures,
-        // does not stop - it repeats every frame until the process is killed.
-        setShadeArt(shadePicture(art, w, h, full));
+        // Everything has finished with it: the measurement, the clock recolour and the JPEG.
+        full.recycle();
         // By path, not by value, and that is not an optimisation.
         //
         // Measured on this phone: the largest cover in the library composes to 612KB, the
@@ -5055,6 +4664,8 @@ public class Main extends XposedModule {
         if (shared != null) out.putExtra("file", shared);
         else out.putExtra("jpg", jpg);
         ctx.sendBroadcast(out);
+        // After the send: the shade's background is not what anyone is waiting on.
+        ShadeLayer.setArt(art);
         Xp.log(TAG + "pushart " + w + "x" + h + " bias=" + sBias
                 + " as " + jpg.length + "B jpeg, draw " + (tc - t0) + "ms encode "
                 + (android.os.SystemClock.uptimeMillis() - tc) + "ms");
@@ -5312,58 +4923,6 @@ public class Main extends XposedModule {
      * media card without stranding the artwork under the clock - so it is a live knob, and a
      * change re-composes what is already on screen instead of waiting for the next track.
      */
-    /**
-     * What the notification shade's cover layer should show.
-     *
-     * The default is the lock screen's own picture, SHARED - one bitmap on the heap, and a
-     * pull-down reveals exactly what the lock screen is showing. A non-zero delta composes a
-     * second one at its own framing instead, which is a full-screen allocation and a second
-     * compose per push; that is the user's choice to make, and it is why the knob is a delta
-     * that starts at zero rather than a bias with a value.
-     *
-     * Called from the composing worker, so the throw is caught here rather than reaching
-     * KillApplicationHandler - the same reason pushArtToWallpaper catches its own compose.
-     */
-    private static Bitmap shadePicture(Bitmap art, int w, int h, Bitmap shared) {
-        final int d = sShadeBiasDelta;
-        if (d == 0) return shared;
-        try {
-            final float b = clamp01(sBias + d / 1000f);
-            // Said out loud because this is the ONE thing the setting costs, and the only way to
-            // tell "the second compose ran" from "the delta was ignored" without watching the
-            // heap: the shade's framing is baked in at compose time and nothing downstream can
-            // report it.
-            Xp.log(TAG + "shade art: own framing at bias " + b + " (lock screen " + sBias
-                    + ", delta " + d + ")");
-            return composeWallpaper(art, w, h, b);
-        } catch (Throwable t) {
-            // One track framed like the lock screen beats no cover at all, and the knob is still
-            // on screen to be moved back.
-            Xp.log(TAG + "the shade's own framing could not be composed, sharing the lock "
-                    + "screen's instead: " + t);
-            return shared;
-        }
-    }
-
-    /**
-     * The notification centre's framing, off the lock screen's by `v` thousandths.
-     *
-     * Re-composes what is already on screen rather than waiting for the next track, the way
-     * setBias() does - a framing knob is only worth having if you can watch it move.
-     */
-    static void setShadeBias(int v) {
-        if (v < -1000) v = -1000;
-        if (v > 1000) v = 1000;
-        sShadeBiasDelta = v;
-        saveState();
-        Xp.log(TAG + "shade cover bias delta = " + v);
-        if (sCoverMode) pushArtAsync(true, false);
-    }
-
-    static int shadeBiasDelta() {
-        return sShadeBiasDelta;
-    }
-
     private static void setBias(float v) {
         sBias = clamp01(v);
         saveState();
@@ -5603,6 +5162,7 @@ public class Main extends XposedModule {
         android.app.WallpaperManager wm = (android.app.WallpaperManager)
                 ctx.getSystemService(Context.WALLPAPER_SERVICE);
         if (wm == null) return false;
+        wallpaperDiag(ctx, wm, force ? "before forced copy" : "before push");
         // Before anything else, and before `force` too - forcing is the same setBitmap and
         // does the same damage. See wallpaperKind(): a live wallpaper on either slot cannot
         // survive being replaced with a still, and this is the only place that could do it.
@@ -5669,6 +5229,7 @@ public class Main extends XposedModule {
             home.recycle();
             Xp.log(TAG + "lock wallpaper set at " + sScreenW + "x" + sScreenH
                     + "; the keyguard engine will be rebuilt");
+            wallpaperDiag(ctx, wm, "after copying home into lock");
             return true;
         } catch (Throwable t) {
             Xp.log(TAG + "could not set a lock wallpaper: " + Log.getStackTraceString(t));
@@ -6032,6 +5593,108 @@ public class Main extends XposedModule {
         } catch (Throwable t) {
             Xp.log(TAG + "cannot read " + section + " from the editor info: " + t);
             return null;
+        }
+    }
+
+    /** [diag] The last report, so a push that changes nothing prints nothing. */
+    private static String sWallpaperDiag = "";
+
+    /**
+     * [diag] Everything the SystemUI side can see about how the two wallpapers are framed, for
+     * the "lock screen and desktop do not line up" report: the screen, both slots' kinds and
+     * file sizes, and MIUI's own record of each slot minus its colour palettes. The wallpaper
+     * process logs the other half - where its renderers put the picture - as [MCWall] [diag].
+     */
+    // Runs inside com.android.systemui, which holds READ_WALLPAPER_INTERNAL.
+    @SuppressLint("MissingPermission")
+    private static void wallpaperDiag(Context ctx, android.app.WallpaperManager wm, String why) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("screen=").append(sScreenW).append('x').append(sScreenH);
+            try {
+                android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+                sb.append(" display=").append(dm.widthPixels).append('x')
+                        .append(dm.heightPixels).append('@').append(dm.densityDpi);
+            } catch (Throwable ignored) {
+            }
+            sb.append(" desired=").append(wm.getDesiredMinimumWidth()).append('x')
+                    .append(wm.getDesiredMinimumHeight());
+            for (String slot : new String[] {"home", "lock"}) {
+                int flag = "lock".equals(slot) ? android.app.WallpaperManager.FLAG_LOCK
+                                               : android.app.WallpaperManager.FLAG_SYSTEM;
+                sb.append("\n  ").append(slot).append(": kind=")
+                        .append(wallpaperKind(ctx, slot)).append(" file=");
+                try {
+                    android.os.ParcelFileDescriptor fd = wm.getWallpaperFile(flag);
+                    if (fd == null) {
+                        sb.append("none");
+                    } else {
+                        java.io.InputStream in =
+                                new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd);
+                        try {
+                            android.graphics.BitmapFactory.Options b =
+                                    new android.graphics.BitmapFactory.Options();
+                            b.inJustDecodeBounds = true;
+                            android.graphics.BitmapFactory.decodeStream(in, null, b);
+                            sb.append(b.outWidth).append('x').append(b.outHeight);
+                        } finally {
+                            in.close();
+                        }
+                    }
+                } catch (Throwable t) {
+                    sb.append("? (").append(t).append(')');
+                }
+                try {
+                    sb.append(" id=").append(wm.getWallpaperId(flag));
+                } catch (Throwable ignored) {
+                }
+                sb.append("\n  ").append(slot).append(" record: ").append(miuiRecord(slot));
+            }
+            String report = sb.toString();
+            if (report.equals(sWallpaperDiag)) return;
+            sWallpaperDiag = report;
+            Xp.log(TAG + "[diag] wallpaper (" + why + ")\n  " + report);
+        } catch (Throwable t) {
+            Xp.log(TAG + "[diag] wallpaper report failed: " + t);
+        }
+    }
+
+    /** [diag] MIUI's slot record as attributes, the ~100 palette/colour ones left out. */
+    private static String miuiRecord(String slot) {
+        java.io.InputStream in = null;
+        try {
+            java.io.File f = new java.io.File("/data/system/theme_magic/users/"
+                    + (android.os.Process.myUid() / 100000)
+                    + "/wallpaper/data/" + slot + ".xml");
+            if (!f.canRead()) return "unreadable";
+            in = new java.io.FileInputStream(f);
+            org.xmlpull.v1.XmlPullParser p = android.util.Xml.newPullParser();
+            p.setInput(in, null);
+            for (int e = p.getEventType(); e != org.xmlpull.v1.XmlPullParser.END_DOCUMENT;
+                    e = p.next()) {
+                if (e != org.xmlpull.v1.XmlPullParser.START_TAG) continue;
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < p.getAttributeCount(); i++) {
+                    String n = p.getAttributeName(i);
+                    if (n.startsWith("palette") || n.startsWith("color")
+                            || n.startsWith("allColors") || n.startsWith("partPalette")
+                            || n.startsWith("partIsDeep") || n.startsWith("isDeep")) {
+                        continue;
+                    }
+                    sb.append(n).append('=').append(p.getAttributeValue(i)).append(' ');
+                }
+                return sb.toString().trim();
+            }
+            return "empty";
+        } catch (Throwable t) {
+            return "? (" + t + ")";
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 
@@ -6836,821 +6499,6 @@ public class Main extends XposedModule {
      * inside and been brief: a drag that began on the artwork does nothing rather than toggling
      * on release.
      */
-    /** The notification row class, resolved once; null until it is. */
-    private static volatile Class<?> sNotifRowCls;
-
-    /** Counters for the three ways the card-blur hook can go quiet; diagnostics. */
-    private static final java.util.concurrent.atomic.AtomicInteger sBlendCalls =
-            new java.util.concurrent.atomic.AtomicInteger();
-    private static final java.util.concurrent.atomic.AtomicInteger sBlurApplied =
-            new java.util.concurrent.atomic.AtomicInteger();
-    private static final java.util.concurrent.atomic.AtomicInteger sBadArgs =
-            new java.util.concurrent.atomic.AtomicInteger();
-
-    /**
-     * The notification row this view belongs to, or null.
-     *
-     * Asked of the VIEW and not of its position, and the first attempt at this got that wrong.
-     * The obvious scope - "a descendant of NotificationPanelView" - rejected every row on the
-     * device: measured, `applyElementViewBlend` is called while the row is still being prepared,
-     * when its ancestry ends at a detached root and never meets the panel at all. A test that
-     * needs the row to be somewhere it has not been put yet is not a scope, it is an off switch.
-     */
-    private static View rowOf(View v) {
-        Class<?> rc = rowClass(v);
-        if (rc == null) return null;
-        for (View c = v; c != null; ) {
-            if (rc.isInstance(c)) return c;
-            final android.view.ViewParent p = c.getParent();
-            c = (p instanceof View) ? (View) p : null;
-        }
-        return null;
-    }
-
-    /**
-     * The host's classloader, captured where one is known to be SystemUI's. See the note at the
-     * capture: a view's own loader is not it, and using the view's is what silently disabled
-     * this whole feature once.
-     */
-    private static volatile ClassLoader sHostLoader;
-
-    private static Class<?> rowClass(View v) {
-        Class<?> rc = sNotifRowCls;
-        if (rc != null) return rc;
-        ClassLoader ld = sHostLoader;
-        if (ld == null) {
-            ld = v.getClass().getClassLoader();
-            // A framework view's loader cannot see SystemUI at all. Nothing is wrong and there is
-            // nothing to try - the next call from a SystemUI view will resolve it.
-            if (ld == null) return null;
-        }
-        try {
-            rc = Xp.findClass(
-                    "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow",
-                    ld);
-            sNotifRowCls = rc;
-            return rc;
-        } catch (Throwable t) {
-            // Once, not per call: this is a failure that repeats on every element of every card.
-            if (!sNoRowCls) {
-                sNoRowCls = true;
-                Xp.log(TAG + "no ExpandableNotificationRow via " + ld + ": " + t
-                        + " - no card will be treated as a notification row");
-            }
-            return null;
-        }
-    }
-
-    private static volatile boolean sNoRowCls;
-
-    /**
-     * Records a write, once per distinct (element, row) pair, with a running count.
-     *
-     * The first-only log this replaces made coverage invisible: "every row got the blur" and
-     * "exactly one row did" printed the same single line, and telling those apart is the whole
-     * of the current question.
-     */
-    /**
-     * The system's own choice of which view is a card's material - recorded, not written.
-     *
-     * The write used to happen right here, at prepare time, and that is what put it on the lock
-     * screen. A row is the SAME view on the keyguard and in the notification centre; prepare time
-     * cannot tell which one it is preparing for, and the material outlives the prepare. The
-     * element is still the system's to choose - only the moment moved, to the one place where
-     * "is this the notification centre" has an answer: the finished tree with the shade open.
-     * See setCardBlurActive().
-     */
-    private static final java.util.Map<View, View> sCandidates =
-            java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<View, View>());
-
-    private static void noteCandidate(View v, View row) {
-        synchronized (sCandidates) {
-            if (sCandidates.size() > 512) {
-                sCandidates.clear();
-                Xp.log(TAG + "card elements: candidate set overflowed, cleared");
-            }
-            if (!sCandidates.containsKey(v)) sCandidates.put(v, row);
-        }
-        // A row prepared while the notification centre is ALREADY up never sees the rising edge,
-        // and would sit there sampling the app behind the shade until the next pull-down. The
-        // sweep is idempotent and the candidate list is small, so asking again is the cheap half
-        // of that trade.
-        if (sCardBlurActive) setCardBlurActive(true, false);
-    }
-
-    /**
-     * Puts the local blur on every card element that is in the notification centre, or takes it
-     * back off every one that has it.
-     *
-     * Driven from the edges of the shade being open - ShadeLayer's own progress driver is the
-     * only thing in the module that knows the notification centre is up. Read the falling edge as
-     * the important one: the write is a property of a view and does not know when it has stopped
-     * being true, which is the whole of the lock screen bug.
-     */
-    /**
-     * Whether the shade is up AND the feature is switched on - both, so that a card element
-     * arriving later does not re-sweep for nothing while the switch is off.
-     */
-    private static volatile boolean sCardBlurActive;
-
-    static void setCardBlurActive(final boolean on) {
-        setCardBlurActive(on, true);
-    }
-
-    /**
-     * @param withChrome also look for the clear-all affordance, which means walking the whole
-     *                   shade window. True only on the edges of the shade being open: a card
-     *                   element arriving later re-runs the sweep, and a full tree walk per card
-     *                   is a lot of work to do on the frame a notification lands on.
-     */
-    private static void setCardBlurActive(final boolean on, final boolean withChrome) {
-        sCardBlurActive = on && ShadeLayer.cardBlurOn();
-        main().post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (!on) {
-                        final int n = restoreCards();
-                        if (n > 0) Xp.log(TAG + "card blur off: restored " + n + " views");
-                        return;
-                    }
-                    if (!ShadeLayer.cardBlurOn()) {
-                        // Said out loud, and that is the fix to a real diagnosis problem: this
-                        // returned silently, and a sweep that writes nothing because a switch is
-                        // off looked identical in the log to a sweep that had no cards to write.
-                        Xp.log(TAG + "card blur on: switch is off, nothing written");
-                        return;
-                    }
-                    final java.util.List<View> vs;
-                    synchronized (sCandidates) {
-                        vs = new java.util.ArrayList<>(sCandidates.keySet());
-                    }
-                    int applied = 0, gone = 0, other = 0;
-                    for (int i = 0; i < vs.size(); i++) {
-                        final View v = vs.get(i);
-                        // No position test here, and its absence is a measurement, not a
-                        // simplification. It was "under NotificationPanelView", it rejected EVERY
-                        // card on this build, and the ancestry probe says why: the notification
-                        // stack is not under the panel at all. Measured chain -
-                        //
-                        //   NotificationBackgroundView#backgroundNormal
-                        //     < ExpandableNotificationRow
-                        //     < NotificationStackScrollLayout#notification_stack_scroller
-                        //     < SharedNotificationContainer#shared_notification_container
-                        //     < NotificationShadeWindowView#legacy_window_root
-                        //
-                        // - and the container's own name is the answer to the whole puzzle: it is
-                        // SHARED between the keyguard and the notification centre, so the two are
-                        // the same views in the same stack and no ancestry can separate them.
-                        //
-                        // The scoping is the TIMING instead, which is the stronger form of it.
-                        // Every candidate is already known to be a card element - either inside an
-                        // ExpandableNotificationRow and not a heads-up, or row-less and accepted
-                        // below only if it belongs to the media card - and this sweep only runs
-                        // across the edges of the shade being open on an unlocked phone. The
-                        // keyguard cannot be written to because it is not what is on screen while
-                        // the notification centre is up, which is
-                        // precisely the mistake the prepare-time write made.
-                        if (!v.isAttachedToWindow()) {
-                            gone++;
-                            continue;
-                        }
-                        if (sWritten.containsKey(v)) continue;
-                        final View row = sCandidates.get(v);
-                        // A row-less element is only ours if it belongs to the media card - the
-                        // one card that is not a notification row, and the one the utility hands
-                        // over as a bare ImageView. Everything else without a row is something
-                        // else in the window, and the clock glass the last wrong guess cost is
-                        // exactly what lives there.
-                        if (row == null && !insideMediaCard(v)) {
-                            other++;
-                            continue;
-                        }
-                        writeCard(v, row);
-                        applied++;
-                    }
-                    // The clear-all affordance, which is a different kind of thing from every
-                    // card here and is looked for separately.
-                    //
-                    // It never appears in the candidate list at all: the utility is not handed it,
-                    // so there is no element to wait for and no "was it accepted" to answer. It
-                    // is the notification centre's own chrome rather than one of its cards, and
-                    // the only handle on it is its id - so it is found by name, and every match is
-                    // logged in full. That log is not decoration: if the wrong view is picked,
-                    // this is the only place that can say so, because the pick is by name and a
-                    // name is a guess about what a view is for.
-                    final View panel = withChrome ? ShadeLayer.panelView() : null;
-                    if (panel != null) {
-                        final java.util.List<View> chrome = new java.util.ArrayList<>();
-                        collectClearChrome(panel.getRootView(), chrome);
-                        for (int i = 0; i < chrome.size(); i++) {
-                            final View c = chrome.get(i);
-                            if (sWritten.containsKey(c)) continue;
-                            writeCard(c, null);
-                            applied++;
-                            Xp.log(TAG + "clear-all: wrote to " + c.getClass().getName()
-                                    + " #" + viewIdOf(c) + " shown=" + c.isShown()
-                                    + " wh=" + c.getWidth() + "x" + c.getHeight()
-                                    + " " + MiBlur.describe(c));
-                        }
-                    }
-
-                    // Logged only when the numbers change. A new element arrives while the shade
-                    // is already up and re-runs the sweep, which is right but was printing the
-                    // same line ten times in a millisecond.
-                    final String line = applied + "/" + gone + "/" + other + "/" + sWritten.size();
-                    if (!line.equals(sLastSweep)) {
-                        sLastSweep = line;
-                        Xp.log(TAG + "card blur on: " + applied + " applied, " + gone
-                                + " detached, " + other + " not a card, "
-                                + sWritten.size() + " holding it");
-                    }
-                } catch (Throwable t) {
-                    Xp.log(TAG + "card blur sweep failed: " + t);
-                }
-            }
-        });
-    }
-
-    /** The last sweep line printed, so an unchanged sweep does not print again. */
-    private static volatile String sLastSweep = "";
-
-    // ------------------------------------------------------------------ content push
-
-    /**
-     * The notification centre's content, moved down out of the cover's way.
-     *
-     * The curtain is the WHOLE screen: at a full pull there is nothing on it that is not the
-     * cover. The media card and the notification rows are glass over it, so the only way to show
-     * more of the picture is to open a band of it - this shifts the content down by a fixed
-     * amount, and what is left uncovered under the clock is cover with nothing on it.
-     *
-     * Driven from the same edge as the card blur, and for the same reason: the write is a property
-     * of a VIEW, the keyguard and the notification centre are the same views, and a shift left
-     * behind would move the lock screen's notifications with it.
-     *
-     * Written on the RISING edge, which is safe because of where the content is when it fires. The
-     * edge is at 4.5% of a pull and the stack's first pixel is a third of the way down the screen,
-     * so the write lands while the content is still off the bottom - there is no frame on which
-     * the move can be seen. Doing it on the falling edge instead would be a shift on the frame the
-     * shade is closing, which is the one frame that is definitely on screen.
-     */
-    private static volatile View sPushStack;
-    private static volatile View sPushCard;
-    /** The "no stack to move" warning is worth printing once, not on every pull-down. */
-    private static volatile boolean sPushWarned;
-
-    /**
-     * @param on whether the cover is up in the notification centre. False restores, always.
-     */
-    static void setShadeContentShift(final boolean on) {
-        final int px = ShadeLayer.contentPush();
-        main().post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (!on || px <= 0) {
-                        pushRestore();
-                        return;
-                    }
-                    final View root = ShadeLayer.shadeRoot();
-                    if (root == null) return;
-                    final View stack = notificationStack(root);
-                    if (stack == null) {
-                        if (!sPushWarned) {
-                            sPushWarned = true;
-                            Xp.log(TAG + "content push: no notification stack under "
-                                    + root.getClass().getSimpleName() + " - there is nothing to "
-                                    + "move on this build, so the setting does nothing here");
-                        }
-                        return;
-                    }
-                    // The media card is the one piece of the shade that may NOT live under the
-                    // stack - and whether it does is the difference between one write and two.
-                    // Under it, the stack carries the card down by itself. Beside it, the card
-                    // needs the same shift on its own, or the gap opens between the card and the
-                    // notifications instead of above the card.
-                    final View card = mediaCardView(root);
-                    View host = null;
-                    if (card != null && !isAncestorOf(stack, card)) {
-                        final android.view.ViewParent sp = stack.getParent();
-                        if (sp instanceof View) host = outerChildUnder(card, (View) sp);
-                    }
-                    sPushStack = stack;
-                    sPushCard = host;
-                    stack.setTranslationY(px);
-                    if (host != null) host.setTranslationY(px);
-                    Xp.log(TAG + "content push: " + px + "px on "
-                            + stack.getClass().getSimpleName() + "#" + viewIdOf(stack)
-                            + (host != null
-                                    ? " + " + host.getClass().getSimpleName() + "#" + viewIdOf(host)
-                                    : card == null
-                                            ? " (no media card found - the card will not move)"
-                                            : " (card is inside the stack)"));
-                } catch (Throwable t) {
-                    Xp.log(TAG + "content push failed: " + t);
-                }
-            }
-        });
-    }
-
-    /**
-     * What the push is holding right now, for the shade diagnostic.
-     *
-     * The value is read back OFF THE VIEW rather than reported from our own write, because the
-     * question this exists to answer is precisely whether the write survived: the stack is
-     * SystemUI's own view and it is free to move itself, and "we set 300" and "the view is 300"
-     * are different claims. `ty=0` with `on/300px` is the answer "the system took it back".
-     */
-    static String shadePushDescribe() {
-        final View stack = sPushStack;
-        if (stack == null) return "off";
-        return "on/" + ShadeLayer.contentPush() + "px ty=" + stack.getTranslationY()
-                + (sPushCard == null ? "" : " card ty=" + sPushCard.getTranslationY());
-    }
-
-    /** Hands the two views back. Idempotent, and reachable from every path out of the shade. */
-    private static void pushRestore() {
-        final View stack = sPushStack;
-        final View card = sPushCard;
-        if (stack == null && card == null) return;
-        sPushStack = null;
-        sPushCard = null;
-        try {
-            if (stack != null && stack.getTranslationY() != 0f) stack.setTranslationY(0f);
-            if (card != null && card.getTranslationY() != 0f) card.setTranslationY(0f);
-            Xp.log(TAG + "content push: back to 0");
-        } catch (Throwable t) {
-            Xp.log(TAG + "content push could not be undone: " + t);
-        }
-    }
-
-    /**
-     * The stack the notification rows live in.
-     *
-     * By id first, then by class: this module's own hooks have already been bitten once by a
-     * renamed class on another HyperOS build, and a fallback walk that runs on the edges of a
-     * pull-down is cheaper than a setting that quietly does nothing.
-     */
-    private static View notificationStack(View root) {
-        try {
-            final int id = root.getContext().getResources()
-                    .getIdentifier("notification_stack_scroller", "id", "com.android.systemui");
-            if (id != 0) {
-                final View v = root.findViewById(id);
-                if (v != null) return v;
-            }
-        } catch (Throwable ignored) {
-        }
-        return findStackByClass(root);
-    }
-
-    private static View findStackByClass(View v) {
-        if (v.getClass().getSimpleName().equals("NotificationStackScrollLayout")) return v;
-        if (!(v instanceof ViewGroup)) return null;
-        final ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) {
-            final View hit = findStackByClass(g.getChildAt(i));
-            if (hit != null) return hit;
-        }
-        return null;
-    }
-
-    private static View mediaCardView(View root) {
-        try {
-            final int id = root.getContext().getResources()
-                    .getIdentifier("mi_media_controls", "id", "com.android.systemui");
-            return id == 0 ? null : root.findViewById(id);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    /**
-     * The child of `ancestor` that `v` sits inside, or null when `v` is not under it at all.
-     *
-     * Matching on the ANCESTOR and not on a class name on purpose: the media card's own container
-     * is an implementation detail of the build, and this asks the tree the one question that
-     * matters - which view would have to move for the card to move with it.
-     */
-    private static View outerChildUnder(View v, View ancestor) {
-        for (View c = v; c != null; ) {
-            final android.view.ViewParent p = c.getParent();
-            if (p == ancestor) return c;
-            c = (p instanceof View) ? (View) p : null;
-        }
-        return null;
-    }
-
-    /**
-     * Views whose id names the clear-all affordance.
-     *
-     * A match that CONTAINS another match is dropped - the pill and the layout that holds it can
-     * both be named for the same thing, and writing the local blur to both would blur the button
-     * twice, once as itself and once as its parent's background. The innermost match is the pill.
-     */
-    private static void collectClearChrome(View v, java.util.List<View> out) {
-        if (v.getId() != View.NO_ID) {
-            final String n = viewIdOf(v).toLowerCase();
-            if (n.contains("clear") || n.contains("dismiss")) {
-                for (int i = 0; i < out.size(); ) {
-                    if (isAncestorOf(v, out.get(i))) out.remove(i);
-                    else i++;
-                }
-                if (!isInsideAny(v, out)) out.add(v);
-            }
-        }
-        // Descends into a match as well: the pill and the layout holding it can both be named for
-        // the same thing, and the inner one is the pill.
-        if (!(v instanceof ViewGroup)) return;
-        final ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) collectClearChrome(g.getChildAt(i), out);
-    }
-
-    private static boolean isAncestorOf(View a, View b) {
-        for (View c = b; c != null; ) {
-            if (c == a) return true;
-            final android.view.ViewParent p = c.getParent();
-            c = (p instanceof View) ? (View) p : null;
-        }
-        return false;
-    }
-
-    private static boolean isInsideAny(View v, java.util.List<View> set) {
-        for (int i = 0; i < set.size(); i++) if (isAncestorOf(set.get(i), v)) return true;
-        return false;
-    }
-
-    /**
-     * Whether this view belongs to the media card.
-     *
-     * Asked of the TREE and not of the view's class, and asked at the sweep for the same reason
-     * everything else is: the card hands the hook a bare ImageView with nothing in it to
-     * recognise, and only the assembled tree can say whose it is. `mi_media_controls` is the
-     * module's own handle on this card - the same id the card takeover feature already uses.
-     */
-    private static boolean insideMediaCard(View v) {
-        int id = sMediaCardId;
-        if (id == -1) {
-            try {
-                id = v.getContext().getResources()
-                        .getIdentifier("mi_media_controls", "id", "com.android.systemui");
-            } catch (Throwable t) {
-                id = 0;
-            }
-            sMediaCardId = id;
-            Xp.log(TAG + "media card id = " + id);
-        }
-        if (id == 0) return false;
-        for (View c = v; c != null; ) {
-            if (c.getId() == id) return true;
-            final android.view.ViewParent p = c.getParent();
-            c = (p instanceof View) ? (View) p : null;
-        }
-        return false;
-    }
-
-    /** -1 until resolved, 0 when this build has no such id. */
-    private static volatile int sMediaCardId = -1;
-
-    private static void writeCard(View v, View row) {
-        noteBlurApplied(v, row);
-        MiBlur.applyLocalBlur(v, ShadeLayer.cardBlurRadius());
-    }
-
-    /** Takes the local blur back off every view it was written to. Returns how many. */
-    private static int restoreCards() {
-        final java.util.List<View> vs;
-        synchronized (sWritten) {
-            vs = new java.util.ArrayList<>(sWritten.keySet());
-        }
-        for (int i = 0; i < vs.size(); i++) {
-            final View v = vs.get(i);
-            MiBlur.restore(v, sWritten.get(v));
-        }
-        synchronized (sWritten) {
-            sWritten.clear();
-        }
-        return vs.size();
-    }
-
-    private static void noteBlurApplied(View v, View row) {
-        // Snapshot BEFORE the write, so the write can be taken back. The first snapshot wins: a
-        // row that is prepared again and again must go back to the material it had before the
-        // very first write, not to the one it had before the latest.
-        final int[] was = MiBlur.snapshot(v);
-        synchronized (sWritten) {
-            if (!sWritten.containsKey(v)) sWritten.put(v, was);
-        }
-        final int n = sBlurApplied.incrementAndGet();
-        final String kind = v.getClass().getName() + " in "
-                + (row == null ? "?" : row.getClass().getSimpleName());
-        if (sBlurAppliedKinds.add(kind)) {
-            Xp.log(TAG + "card blur applied #" + n + " to " + kind
-                    + " key=" + rowKey(row) + " inPanel=" + ShadeLayer.insidePanel(v)
-                    + " was=" + java.util.Arrays.toString(was)
-                    + " r=" + ShadeLayer.cardBlurRadius());
-        }
-    }
-
-    /**
-     * Views the local blur has been written to, by identity, with the state each had before it.
-     *
-     * Strong references, which is normally the wrong thing to hold in a system process - but
-     * this is the only record of what the system's own material was, and a view that has been
-     * forgotten is a view that cannot be put back. The rows come from a bounded recycled pool.
-     */
-    private static final java.util.Map<View, int[]> sWritten =
-            java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<View, int[]>());
-    private static final java.util.Set<String> sBlurAppliedKinds =
-            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
-
-    /** A notification row's stable key, for naming it in the log. "?" when this build moved it. */
-    private static String rowKey(View row) {
-        if (row == null) return "?";
-        try {
-            final Object k = Xp.callMethod(row, "getKey");
-            if (k != null) return String.valueOf(k);
-        } catch (Throwable ignored) {
-        }
-        return "?";
-    }
-
-    /**
-     * Every notification row under the panel, and whether the local blur reached it.
-     *
-     * The hook fires per row while the row is being prepared, so which rows it reaches is
-     * decided by the order the tree is built in - and nothing in the log said how many rows
-     * there were or which of them were missed. This asks the finished tree instead.
-     */
-    private static void dumpNotifRows() {
-        final View panel = ShadeLayer.panelView();
-        if (panel == null) {
-            Xp.log(TAG + "rows: no panel - is the shade up?");
-            return;
-        }
-        panel.post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    final Class<?> rc = rowClass(panel);
-                    if (rc == null) {
-                        Xp.log(TAG + "rows: no row class");
-                        return;
-                    }
-                    final java.util.List<View> rows = new java.util.ArrayList<>();
-                    // From the WINDOW, not from the panel: measured, the panel is not an
-                    // ancestor of a single card element on this build, so a walk rooted there
-                    // finds nothing and says "no rows" - which reads exactly like "no
-                    // notifications" and cost a wrong scope test.
-                    final View root = panel.getRootView();
-                    collectRows(root, rc, rows);
-                    Xp.log(TAG + "rows: " + rows.size() + " under "
-                            + root.getClass().getSimpleName()
-                            + " cardBlurOn=" + ShadeLayer.cardBlurOn()
-                            + " r=" + ShadeLayer.cardBlurRadius());
-                    for (int i = 0; i < rows.size(); i++) {
-                        final View r = rows.get(i);
-                        final int[] loc = new int[2];
-                        r.getLocationOnScreen(loc);
-                        Xp.log(TAG + "row#" + i + " " + r.getClass().getSimpleName()
-                                + " key=" + rowKey(r)
-                                + " headsUp=" + isHeadsUp(r)
-                                + " vis=" + r.getVisibility()
-                                + " at=" + loc[0] + "," + loc[1]
-                                + " wh=" + r.getWidth() + "x" + r.getHeight()
-                                + " written=" + sWritten.containsKey(r)
-                                + " shown=" + r.isShown()
-                                + " inPanel=" + ShadeLayer.insidePanel(r)
-                                + " bg=" + describeBackground(r));
-                        Xp.log(TAG + "  anc=" + ancestry(r));
-                    }
-                } catch (Throwable t) {
-                    Xp.log(TAG + "rows probe failed: " + t);
-                }
-            }
-        });
-    }
-
-    private static void collectRows(View v, Class<?> rc, java.util.List<View> out) {
-        if (rc.isInstance(v)) out.add(v);
-        if (!(v instanceof ViewGroup)) return;
-        final ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) collectRows(g.getChildAt(i), rc, out);
-    }
-
-    /** A row's own background view - the thing the hook writes to - and its live blur state. */
-    private static String describeBackground(View row) {
-        if (!(row instanceof ViewGroup)) return "no children";
-        final ViewGroup g = (ViewGroup) row;
-        final StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < g.getChildCount(); i++) {
-            final View c = g.getChildAt(i);
-            if (!c.getClass().getName().contains("Background")) continue;
-            sb.append(c.getClass().getSimpleName())
-              .append("[written=").append(sWritten.containsKey(c))
-              .append(' ').append(MiBlur.describe(c)).append("] ");
-        }
-        return sb.length() == 0 ? "none" : sb.toString().trim();
-    }
-
-    /**
-     * Every view in the shade window carrying a blur, and its live state.
-     *
-     * This is the oracle for "whose glass is this". A card's material lives on one view, and a
-     * card whose glass is wrong cannot be fixed by anyone who does not know which view to write
-     * to - the media card's glass is not on a notification row, never reaches the hook, and so
-     * is invisible to every other probe in the module. Views we have written are marked with a
-     * `*`, so our own writes and the system's own material can be told apart in one listing.
-     */
-    private static void dumpBlurScan() {
-        final View panel = ShadeLayer.panelView();
-        if (panel == null) {
-            Xp.log(TAG + "blurscan: no panel - is the shade up?");
-            return;
-        }
-        panel.post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    final View root = panel.getRootView();
-                    Xp.log(TAG + "blurscan from " + root.getClass().getSimpleName()
-                            + " cardBlurOn=" + ShadeLayer.cardBlurOn()
-                            + " written=" + sWritten.size());
-                    scanBlur(root);
-                } catch (Throwable t) {
-                    Xp.log(TAG + "blurscan failed: " + t);
-                }
-            }
-        });
-    }
-
-    private static void scanBlur(View v) {
-        final int[] now = MiBlur.snapshot(v);
-        if (now[0] > 0 || now[1] > 0) {
-            final int[] loc = new int[2];
-            v.getLocationOnScreen(loc);
-            Xp.log(TAG + "blur" + (sWritten.containsKey(v) ? "*" : " ") + " "
-                    + v.getClass().getName() + " #" + viewIdOf(v)
-                    + " vis=" + v.getVisibility()
-                    + " at=" + loc[0] + "," + loc[1]
-                    + " wh=" + v.getWidth() + "x" + v.getHeight()
-                    + " inPanel=" + ShadeLayer.insidePanel(v)
-                    + " " + MiBlur.describe(v));
-        }
-        if (!(v instanceof ViewGroup)) return;
-        final ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) scanBlur(g.getChildAt(i));
-    }
-
-    /**
-     * Takes the local blur back off every view it was written to.
-     *
-     * The write is a property of a VIEW and outlives the state that justified it, which is the
-     * whole reason the lock screen's cards came out wrong: a row written while the notification
-     * centre is up keeps that material on the keyguard, where the same row is the same view and
-     * the correct glass samples the wallpaper instead.
-     */
-    private static void clearCardBlur() {
-        main().post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Xp.log(TAG + "blurclear: restored " + restoreCards() + " views");
-                } catch (Throwable t) {
-                    Xp.log(TAG + "blurclear failed: " + t);
-                }
-            }
-        });
-    }
-
-    /**
-     * The media card and everything under it, with each view's live blur.
-     *
-     * The one card whose glass is NOT on a notification row: it never appears as a card element,
-     * so it is invisible to the candidate list and to every other probe here. Its subtree is
-     * printed class by class because the card is translucent over the container's blur rather
-     * than carrying one of its own, and naming the view that would have to take a local blur is
-     * the only way to give it the cover as well.
-     */
-    private static void dumpMediaCard(View root) {
-        try {
-            final int id = root.getContext().getResources()
-                    .getIdentifier("mi_media_controls", "id", "com.android.systemui");
-            final View card = id == 0 ? null : root.findViewById(id);
-            if (card == null) {
-                Xp.log(TAG + "mediacard: not under " + root.getClass().getSimpleName());
-                return;
-            }
-            Xp.log(TAG + "mediacard " + card.getClass().getName() + " #" + viewIdOf(card)
-                    + " shown=" + card.isShown() + " wh=" + card.getWidth() + "x"
-                    + card.getHeight() + " " + MiBlur.describe(card));
-            walkMediaCard(card, "  ");
-        } catch (Throwable t) {
-            Xp.log(TAG + "mediacard probe failed: " + t);
-        }
-    }
-
-    private static void walkMediaCard(View v, String pad) {
-        if (!(v instanceof ViewGroup)) return;
-        final ViewGroup g = (ViewGroup) v;
-        for (int i = 0; i < g.getChildCount(); i++) {
-            final View c = g.getChildAt(i);
-            Xp.log(TAG + "  " + pad + c.getClass().getSimpleName() + " #" + viewIdOf(c)
-                    + " vis=" + c.getVisibility()
-                    + " wh=" + c.getWidth() + "x" + c.getHeight()
-                    + " " + MiBlur.describe(c));
-            walkMediaCard(c, pad + "  ");
-        }
-    }
-
-    /**
-     * A view's ancestry, innermost first, as `Class#id<Class#id<...`.
-     *
-     * Written because "is it under NotificationPanelView" turned out to be false for EVERY card
-     * element on this device, which leaves the question of what container they are under instead.
-     * A scope test can only be built on an ancestor that is actually there.
-     */
-    private static String ancestry(View v) {
-        final StringBuilder sb = new StringBuilder();
-        int n = 0;
-        for (View c = v; c != null && n < 7; n++) {
-            if (n > 0) sb.append('<');
-            sb.append(c.getClass().getSimpleName());
-            if (c.getId() != View.NO_ID) sb.append('#').append(viewIdOf(c));
-            final android.view.ViewParent p = c.getParent();
-            c = (p instanceof View) ? (View) p : null;
-        }
-        return sb.toString();
-    }
-
-    /** Every element the system has offered us, whether we wrote to it, and what it is. */
-    private static void dumpCandidates() {
-        final java.util.List<View> vs;
-        synchronized (sCandidates) {
-            vs = new java.util.ArrayList<>(sCandidates.keySet());
-        }
-        main().post(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Xp.log(TAG + "cand: " + vs.size() + " elements, written=" + sWritten.size()
-                            + ", cardBlurOn=" + ShadeLayer.cardBlurOn());
-                    for (int i = 0; i < vs.size(); i++) {
-                        final View v = vs.get(i);
-                        final View row = sCandidates.get(v);
-                        final int[] loc = new int[2];
-                        v.getLocationOnScreen(loc);
-                        Xp.log(TAG + "cand " + (sWritten.containsKey(v) ? "*" : " ")
-                                + " " + v.getClass().getName() + " #" + viewIdOf(v)
-                                + " row=" + (row == null ? "none" : rowKey(row))
-                                + " mediaCard=" + (row == null && insideMediaCard(v))
-                                + " attached=" + v.isAttachedToWindow()
-                                + " shown=" + v.isShown()
-                                + " vis=" + v.getVisibility()
-                                + " at=" + loc[0] + "," + loc[1]
-                                + " wh=" + v.getWidth() + "x" + v.getHeight()
-                                + " inPanel=" + ShadeLayer.insidePanel(v)
-                                + " " + MiBlur.describe(v));
-                        Xp.log(TAG + "  anc=" + ancestry(v));
-                    }
-                    if (!vs.isEmpty()) dumpMediaCard(vs.get(0).getRootView());
-                } catch (Throwable t) {
-                    Xp.log(TAG + "cand probe failed: " + t);
-                }
-            }
-        });
-    }
-
-    /**
-     * Whether this view, or the row it belongs to, is a floating notification.
-     *
-     * Unanswerable counts as yes, so a build whose row class or state method has moved keeps the
-     * floating notification untouched and merely loses the local blur - the safe direction.
-     */
-    private static boolean isHeadsUp(View row) {
-        try {
-            return Boolean.TRUE.equals(Xp.callMethod(row, "isHeadsUpState"));
-        } catch (Throwable ignored) {
-        }
-        try {
-            return Boolean.TRUE.equals(Xp.callMethod(row, "isHeadsUp"));
-        } catch (Throwable ignored) {
-        }
-        // Neither method is on this build, so the row cannot be shown not to be a pop-up.
-        // Skipping is the safe way to be wrong here: the cost is a card that keeps the system's
-        // own glass, and the alternative is restyling a floating notification nobody asked us
-        // to touch.
-        if (sNoHeadsUpApi) return true;
-        sNoHeadsUpApi = true;
-        Xp.log(TAG + "no isHeadsUpState/isHeadsUp on " + row.getClass().getName()
-                + " - heads-up notifications cannot be told apart, so NO notification rows "
-                + "will get the local blur on this build");
-        return true;
-    }
-
-    private static volatile boolean sNoHeadsUpApi;
-
     private static boolean swallowArtTap(MotionEvent ev) {
         int action = ev.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {

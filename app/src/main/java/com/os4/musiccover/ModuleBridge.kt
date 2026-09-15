@@ -197,11 +197,9 @@ object ModuleBridge {
     /**
      * One shade setting, by the module's own key.
      *
-     * A single op for the whole page rather than one per knob. There are a dozen of them, every
-     * one an int with a range, and a dozen near-identical ops would be a dozen chances for this
-     * side and the module to drift. The key is matched and the value clamped inside
-     * ShadeLayer.configure, so the settings page and an adb shell go through the same door and
-     * a value typed at a shell cannot drive the spring somewhere the UI would not.
+     * A single op for the whole page rather than one per setting, so this side and the module
+     * cannot drift. The key is matched and the value clamped inside ShadeLayer.configure, so the
+     * settings page and an adb shell go through the same door.
      */
     fun setShade(context: Context, key: String, value: Int) =
         send(context, "shadecfg") {
