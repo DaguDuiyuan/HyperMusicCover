@@ -71,6 +71,9 @@ final class LyricSource {
      * The player's own lyrics, if the session carries them. Null when nothing has published any,
      * which is the normal state on a device with no provider modules installed.
      */
+    // "lyricInfo" is not one of the framework's metadata keys and is not meant to be: it is the
+    // players' and provider modules' own, and a Bundle lookup by any string is valid.
+    @android.annotation.SuppressLint("WrongConstant")
     static String lyricInfoOf(MediaController c) {
         if (c == null) {
             return null;

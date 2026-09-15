@@ -721,14 +721,14 @@ final class LyricView extends View {
             main[i] = StaticLayout.Builder.obtain(l.text, 0, l.text.length(), paint, w)
                     .setAlignment(align)
                     .setIncludePad(false)
-                    .setBreakStrategy(Layout.BREAK_STRATEGY_BALANCED)
+                    .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
                     .build();
             float h = main[i].getHeight();
             if (l.bg != null) {
                 bgLay[i] = StaticLayout.Builder.obtain(l.bg.text, 0, l.bg.text.length(), bgPaint, w)
                         .setAlignment(align)
                         .setIncludePad(false)
-                        .setBreakStrategy(Layout.BREAK_STRATEGY_BALANCED)
+                        .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
                         .build();
                 h += BG_GAP_DP * density + bgLay[i].getHeight();
             }
@@ -1052,7 +1052,7 @@ final class LyricView extends View {
             StaticLayout lay = StaticLayout.Builder.obtain(l.text, 0, l.text.length(), p, width)
                     .setAlignment(align)
                     .setIncludePad(false)
-                    .setBreakStrategy(Layout.BREAK_STRATEGY_BALANCED)
+                    .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
                     .build();
             lay.draw(c);
             float below = lay.getHeight();
@@ -1065,7 +1065,7 @@ final class LyricView extends View {
                                 bp, width)
                         .setAlignment(align)
                         .setIncludePad(false)
-                        .setBreakStrategy(Layout.BREAK_STRATEGY_BALANCED)
+                        .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
                         .build();
                 int save = c.save();
                 c.translate(0f, below + bgGap);

@@ -511,6 +511,8 @@ final class LockLyrics {
     }
 
     /** Every string in the session's metadata, and lyricInfo written to a file whole. */
+    // "lyricInfo" is the players' own key, not a framework one - see LyricSource.lyricInfoOf.
+    @android.annotation.SuppressLint("WrongConstant")
     static String dumpMetadata(android.content.Context ctx, MediaController c) {
         if (c == null) return "no session";
         StringBuilder sb = new StringBuilder(c.getPackageName());
