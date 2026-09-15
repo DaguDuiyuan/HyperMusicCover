@@ -320,9 +320,22 @@ public class WallpaperProbe {
      * the CPU fade, and so does anything this finds it cannot do mid-flight.
      */
     private static final class GpuFade {
+        /** The picture in our texture, drawn over the OEM's at the fade's alpha. */
         final Bitmap from;
+        /** The picture in the OEM's texture, underneath. */
+        final Bitmap to;
+        /** The overlay's alpha at the start and at the end. A fresh fade goes 1 -> 0. */
+        final float a0, a1;
+        /**
+         * What the screen shows when this lands. `to` for a fade that ends with the overlay gone;
+         * for one that ends with the overlay at full strength, the picture the OEM texture has
+         * to be swapped to before the overlay can be let go - see drawGpuFade().
+         */
+        final Bitmap dest;
         final long durMs;
         final Runnable done;
+        /** The fade this one reversed, whose texture of `from` it takes over. GL thread clears it. */
+        volatile GpuFade inherit;
         final long startedAt = SystemClock.uptimeMillis();
         /** Set on the GL thread once the upload of the far end has gone through. */
         volatile boolean armed;
@@ -331,11 +344,36 @@ public class WallpaperProbe {
         volatile int frames;
         volatile long uploadMs;
         volatile int contexts;
+        /** The end-of-fade swap of the OEM texture to `dest`: asked for, and landed. */
+        volatile boolean swapRequested;
+        volatile boolean swapUploaded;
+        /** GL thread only: the swap has been posted to the main thread. */
+        boolean swapPosted;
 
-        GpuFade(Bitmap from, long durMs, Runnable done) {
+        GpuFade(Bitmap from, Bitmap to, float a0, float a1, Bitmap dest, long durMs,
+                Runnable done) {
             this.from = from;
+            this.to = to;
+            this.a0 = a0;
+            this.a1 = a1;
+            this.dest = dest;
             this.durMs = durMs;
             this.done = done;
+        }
+
+        /** The overlay's alpha at `now`, as the GL thread will draw it. */
+        float alphaAt(long now) {
+            long s = t0;
+            if (!armed || s == 0L) return a0;
+            float t = Math.min(1f, (now - s) / (float) durMs);
+            // The CPU fade's curve, so switching between the two changes the cost, not the feel.
+            float e = 1f - (1f - t) * (1f - t) * (1f - t);
+            return a0 + (a1 - a0) * e;
+        }
+
+        /** The picture this fade started from. */
+        Bitmap start() {
+            return a1 >= 0.5f ? to : from;
         }
     }
 
@@ -438,7 +476,8 @@ public class WallpaperProbe {
                         } else {
                             args[0] = ov;
                             Object r = chain.proceed(args);
-                            gf.armed = true;
+                            if (!gf.swapRequested) gf.armed = true;
+                            else if (ov == gf.dest) gf.swapUploaded = true;
                             return r;
                         }
                     }
@@ -1045,10 +1084,42 @@ public class WallpaperProbe {
         // same rule the CPU fade's generation check follows, and for the same reason: the one
         // that matters here is the exit's, which clears the art this new fade has just set.
         cancelFade();
-        final GpuFade f = new GpuFade(from, sFadeMs, done);
-        sUploadOverride = to;
-        sGpuFade = f;
-        reloadEngine(sKeyguardEngine, true);
+        final GpuFade old = sGpuFade;
+        final GpuFade f;
+        if (old != null && !old.finished) {
+            float a = old.alphaAt(SystemClock.uptimeMillis());
+            // Not once the old fade has started swapping its underneath picture: the OEM texture
+            // may already be its far end, which this reversal would otherwise take for its start.
+            // That fade is visually over by then, so a fresh fade from it is the right thing.
+            if (!old.swapRequested && sameImage(to, old.start())) {
+                // Going back to where the running fade came from - the big and small clock
+                // toggled again before the last toggle had finished. Starting over from `from`
+                // would jump the wallpaper to that fade's far end and fade back from there.
+                // Both pictures are already on the GPU, so this runs the same pair backwards
+                // from the alpha on screen right now, and uploads nothing to do it.
+                float target = old.a1 >= 0.5f ? 0f : 1f;
+                f = new GpuFade(old.from, old.to, a, target, to, sFadeMs, done);
+                f.inherit = old;
+                f.armed = old.armed;
+                f.t0 = old.armed ? SystemClock.uptimeMillis() : 0L;
+                sUploadOverride = old.to;
+                sGpuFade = f;
+                Xp.log(TAG + "gpu fade reversed at alpha " + Math.round(a * 100f) / 100f
+                        + " -> " + target);
+            } else {
+                // A third picture - a skip while the last one was still fading. Only two
+                // pictures can be on screen, so start from whichever of the two dominates it
+                // now: the jump is at most half a fade instead of all of one.
+                Bitmap near = a >= 0.5f ? old.from : old.to;
+                if (near != null && !near.isRecycled() && near.getWidth() == to.getWidth()
+                        && near.getHeight() == to.getHeight()) {
+                    from = near;
+                }
+                f = startFreshGpuFade(from, to, done);
+            }
+        } else {
+            f = startFreshGpuFade(from, to, done);
+        }
         final android.view.Choreographer ch = android.view.Choreographer.getInstance();
         ch.postFrameCallback(new android.view.Choreographer.FrameCallback() {
             @Override
@@ -1056,17 +1127,39 @@ public class WallpaperProbe {
                 if (sGpuFade != f) return;
                 if (SystemClock.uptimeMillis() - f.startedAt > f.durMs + GPU_FADE_GRACE_MS) {
                     // The GL thread stopped drawing - the screen went off, most likely. End it
-                    // here; what is uploaded is already the far end.
+                    // with a real reload: what is uploaded is the far end only for a fade that
+                    // lands on its underneath picture, not for one waiting on its swap.
                     Xp.log(TAG + "gpu fade timed out after " + f.frames + " frames (armed="
-                            + f.armed + ")");
+                            + f.armed + ", swap=" + f.swapRequested + "/" + f.swapUploaded + ")");
                     finishGpuFade(f);
-                    requestFrame(false);
+                    reloadTexture();
                     return;
                 }
                 requestFrame(true);
                 ch.postFrameCallback(this);
             }
         });
+    }
+
+    /** A fade from `from` to `to` from the start: one reload uploads `to` underneath. */
+    private static GpuFade startFreshGpuFade(Bitmap from, Bitmap to, Runnable done) {
+        GpuFade f = new GpuFade(from, to, 1f, 0f, to, sFadeMs, done);
+        sUploadOverride = to;
+        sGpuFade = f;
+        reloadEngine(sKeyguardEngine, true);
+        return f;
+    }
+
+    /**
+     * Whether two pictures are the same picture. Identity first; otherwise the same size and the
+     * same coarse print, because a cover re-composed for the same track is a new Bitmap with the
+     * same pixels, and that is exactly the case a toggle back into cover mode produces.
+     */
+    private static boolean sameImage(Bitmap a, Bitmap b) {
+        if (a == b) return true;
+        if (a == null || b == null || a.isRecycled() || b.isRecycled()) return false;
+        if (a.getWidth() != b.getWidth() || a.getHeight() != b.getHeight()) return false;
+        return print8(a) == print8(b);
     }
 
     /** Main thread. Lands a fade: its completion runs and the override goes. */
@@ -1099,6 +1192,19 @@ public class WallpaperProbe {
      */
     private static void drawGpuFade(Object renderer, final GpuFade f) {
         android.opengl.EGLContext ctx = android.opengl.EGL14.eglGetCurrentContext();
+        // A reversed fade takes over the texture of the fade it reversed - same picture, so
+        // there is nothing to upload again. The chain is walked because a toggle can reverse a
+        // reversal before the GL thread has drawn the first one.
+        if (f != null && sGlTex != 0 && sGlTexFor != f && f.inherit != null) {
+            int depth = 0;
+            for (GpuFade p = f.inherit; p != null && depth < 16; p = p.inherit, depth++) {
+                if (p == sGlTexFor && p.from == f.from) {
+                    sGlTexFor = f;
+                    break;
+                }
+            }
+        }
+        if (f != null) f.inherit = null;
         if (sGlTex != 0 && (sGlTexFor != f || f.finished || !ctx.equals(sGlTexCtx))) {
             if (ctx.equals(sGlTexCtx)) {
                 GLES20.glDeleteTextures(1, new int[]{sGlTex}, 0);
@@ -1115,7 +1221,27 @@ public class WallpaperProbe {
         // over whatever the texture still is, which is the near end anyway.
         if (f.armed && f.t0 == 0L) f.t0 = now;
         long el = f.t0 == 0L ? 0L : now - f.t0;
-        if (el >= f.durMs) {
+        boolean holding = false;
+        if (el >= f.durMs && f.a1 >= 0.5f && !f.swapUploaded) {
+            // Landing with the overlay at full strength: the screen already shows `dest`, but
+            // from OUR texture. The OEM's has to become it before the overlay can go, or letting
+            // go would cut back to the picture underneath. So one reload, and the overlay is
+            // held at full strength until the upload hook says it has landed.
+            holding = true;
+            if (!f.swapPosted) {
+                f.swapPosted = true;
+                new Handler(Looper.getMainLooper()).post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (sGpuFade != f) return;
+                        sUploadOverride = f.dest;
+                        f.swapRequested = true;
+                        reloadEngine(sKeyguardEngine, true);
+                    }
+                });
+            }
+        }
+        if (el >= f.durMs && !holding) {
             f.finished = true;
             if (sGlTex != 0) {
                 GLES20.glDeleteTextures(1, new int[]{sGlTex}, 0);
@@ -1127,7 +1253,8 @@ public class WallpaperProbe {
                 @Override
                 public void run() {
                     Xp.log(TAG + "gpu fade done in " + (SystemClock.uptimeMillis() - f.startedAt)
-                            + "ms from the request, " + f.frames + " frames over " + f.durMs
+                            + "ms from the request, alpha " + Math.round(f.a0 * 100f) / 100f
+                            + " -> " + f.a1 + ", " + f.frames + " frames over " + f.durMs
                             + "ms, first upload after " + (f.t0 - f.startedAt) + "ms, near end "
                             + "uploaded in " + f.uploadMs + "ms" + (f.contexts > 1
                             ? ", GL context rebuilt " + (f.contexts - 1) + "x mid-fade" : ""));
@@ -1172,10 +1299,7 @@ public class WallpaperProbe {
             f.uploadMs += SystemClock.uptimeMillis() - u0;
         }
 
-        float t = el / (float) f.durMs;
-        // The CPU fade's curve, so switching between the two changes the cost and not the feel.
-        float e = 1f - (1f - t) * (1f - t) * (1f - t);
-        float alpha = 1f - e;
+        float alpha = f.alphaAt(now);
 
         boolean blend = GLES20.glIsEnabled(GLES20.GL_BLEND);
         int[] fn = sGlInts;
