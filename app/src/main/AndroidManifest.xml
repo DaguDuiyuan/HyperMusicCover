@@ -49,11 +49,46 @@
             android:exported="true"
             android:theme="@style/Theme.HyperMusicCover"
             android:windowSoftInputMode="adjustResize">
+            <!-- What LSPosed looks for before it falls back to the launcher entry, so the manager
+                 can still open the app while the icon below is hidden. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            The desktop icon lives on an alias rather than on MainActivity, so hiding it disables
+            only this entry point and never the activity itself.
+        -->
+        <activity-alias
+            android:name=".LauncherAlias"
+            android:exported="true"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <!-- The other way back in while the icon is hidden: dial *#*#95993926#*#*. Both actions,
+             as InstallerX registers them; the dialler decides which one it sends. -->
+        <receiver
+            android:name=".SecretCodeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telephony.action.SECRET_CODE" />
+                <data
+                    android:scheme="android_secret_code"
+                    android:host="95993926" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SECRET_CODE" />
+                <data
+                    android:scheme="android_secret_code"
+                    android:host="95993926" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name=".LicenseActivity"

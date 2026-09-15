@@ -24,6 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.os4.musiccover.LauncherIcon
 import com.os4.musiccover.LocaleHelper
 import com.os4.musiccover.ModuleBridge
 import com.os4.musiccover.R
@@ -194,6 +195,17 @@ fun SettingsPageView(
                             summary = stringResource(R.string.blur_enabled_summary),
                             checked = isBlurEnabled,
                             onCheckedChange = onBlurEnabledChange
+                        )
+
+                        var iconHidden by remember { mutableStateOf(LauncherIcon.isHidden(context)) }
+                        SwitchPreference(
+                            title = stringResource(R.string.hide_launcher_icon),
+                            summary = stringResource(R.string.hide_launcher_icon_summary),
+                            checked = iconHidden,
+                            onCheckedChange = {
+                                LauncherIcon.setHidden(context, it)
+                                iconHidden = it
+                            }
                         )
                     }
                 }
