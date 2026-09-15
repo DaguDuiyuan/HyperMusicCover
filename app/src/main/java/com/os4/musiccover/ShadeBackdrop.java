@@ -70,6 +70,13 @@ final class ShadeBackdrop {
     private static final float SATURATION = 1.15f;
     /** How long a new cover takes to cross-fade over the old one. */
     private static final long CROSSFADE_MS = 1000L;
+    /**
+     * The fastest the background may go from opaque to gone. The shade's progress normally falls
+     * slower than this and is followed exactly; this only catches a progress that jumps straight
+     * to 0 - seen after switching between the shade and the control centre sideways and then
+     * closing - which otherwise cut the background off in one frame.
+     */
+    private static final long FADE_OUT_MS = 200L;
 
     private static volatile MeshGradient.Frame sPending;
     /**
@@ -79,7 +86,10 @@ final class ShadeBackdrop {
      */
     private static volatile long sPendingAt;
     private static volatile boolean sHasArt;
-    /** The fade, read by the GL thread every frame. */
+    /**
+     * The fade the shade asks for, read by the GL thread every frame. What is drawn falls towards
+     * it no faster than {@link #FADE_OUT_MS} allows.
+     */
     private static volatile float sAlpha;
 
     private static SurfaceView sView;
@@ -123,7 +133,7 @@ final class ShadeBackdrop {
             if (sShowing) {
                 sShowing = false;
                 sAlpha = 0f;
-                // One more frame at zero so nothing stale stays on the surface, then stop.
+                // The renderer fades what is left out, draws a last frame at zero and stops.
                 if (sRenderer != null) sRenderer.setRunning(false);
                 UI.removeCallbacks(HIDE_NOW);
                 UI.postDelayed(HIDE_NOW, LINGER_MS);
@@ -146,7 +156,7 @@ final class ShadeBackdrop {
         UI.removeCallbacks(HIDE_NOW);
         sShowing = false;
         sAlpha = 0f;
-        if (sRenderer != null) sRenderer.setRunning(false);
+        if (sRenderer != null) sRenderer.stopNow();
         final SurfaceView v = sView;
         if (v != null && v.getVisibility() != View.GONE) v.setVisibility(View.GONE);
     }
@@ -308,6 +318,11 @@ final class ShadeBackdrop {
         private int mBh;
 
         private boolean mRunning;
+        /** Asked to stop, still fading out what is on screen; stops itself once that is 0. */
+        private boolean mStopping;
+        /** The alpha actually drawn: sAlpha, except that it falls no faster than FADE_OUT_MS. */
+        private float mShown;
+        private long mShownAtNs;
         private boolean mUpload = true;
         private long mLastFrameNs;
         /** Animation time shown so far; paused while stopped, so it resumes where it left. */
@@ -322,23 +337,59 @@ final class ShadeBackdrop {
             mHandler = new Handler(mThread.getLooper());
         }
 
+        /**
+         * Off does not stop at once: frames keep coming until the drawn alpha has fallen to 0, so
+         * a shade whose progress jumped to 0 still fades. {@link #stopNow} is the immediate one.
+         */
         void setRunning(final boolean on) {
             mHandler.post(new Runnable() {
                 @Override
                 public void run() {
-                    if (on == mRunning) return;
-                    mRunning = on;
+                    if (!on) {
+                        if (mRunning) mStopping = true;
+                        return;
+                    }
+                    mStopping = false;
+                    if (mRunning) return;
+                    mRunning = true;
                     mLastFrameNs = 0;
+                    mShownAtNs = 0;
                     final Choreographer ch = Choreographer.getInstance();
                     ch.removeFrameCallback(Renderer.this);
-                    if (on) {
-                        ch.postFrameCallback(Renderer.this);
-                    } else if (mSurface != EGL14.EGL_NO_SURFACE) {
-                        // The last frame, at the alpha the main thread just set: transparent.
-                        draw();
-                    }
+                    ch.postFrameCallback(Renderer.this);
                 }
             });
+        }
+
+        /** For the master switch and a cover that is gone: transparent on the next frame. */
+        void stopNow() {
+            mHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    mShown = 0f;
+                    if (mRunning) stop();
+                }
+            });
+        }
+
+        private void stop() {
+            mRunning = false;
+            mStopping = false;
+            Choreographer.getInstance().removeFrameCallback(this);
+            // The last frame, transparent, so nothing stale stays on the surface.
+            if (mSurface != EGL14.EGL_NO_SURFACE) draw();
+        }
+
+        /** Moves the drawn alpha towards the target: up at once, down at most at FADE_OUT_MS. */
+        private void stepShown(long frameTimeNanos) {
+            final float target = sAlpha;
+            if (target >= mShown || mShownAtNs == 0) {
+                mShown = target;
+            } else {
+                final float dt = (frameTimeNanos - mShownAtNs) / 1e9f;
+                mShown = Math.max(target, mShown - Math.max(0f, dt) * 1000f / FADE_OUT_MS);
+            }
+            mShownAtNs = frameTimeNanos;
         }
 
         void requestUpload() {
@@ -420,6 +471,11 @@ final class ShadeBackdrop {
                 mClock += Math.min(0.1f, (frameTimeNanos - mLastFrameNs) / 1e9f) * TIME_SCALE;
             }
             mLastFrameNs = frameTimeNanos;
+            stepShown(frameTimeNanos);
+            if (mStopping && mShown <= 0f) {
+                stop();
+                return;
+            }
             draw();
         }
 
@@ -528,7 +584,7 @@ final class ShadeBackdrop {
                 GLES20.glUseProgram(mProgram);
                 GLES20.glUniform1f(uTime, mClock);
                 GLES20.glUniform1f(uAspect, mAspectValue);
-                GLES20.glUniform1f(uAlpha, sAlpha);
+                GLES20.glUniform1f(uAlpha, mShown);
                 GLES20.glUniform1i(uTex, 0);
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
 

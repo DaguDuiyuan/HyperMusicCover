@@ -142,7 +142,31 @@ final class ShadeLayer {
      */
     private static void drive() {
         final boolean allowed = sEnabled && !Main.keyguardLocked();
-        ShadeBackdrop.drive(Math.max(sExpansion, sCentreExpansion), allowed);
+        final float f = Math.max(sExpansion, sCentreExpansion);
+        noteCut(f, allowed);
+        ShadeBackdrop.drive(f, allowed);
+    }
+
+    /** The last progress drive() passed on, and which of the two panels it came from. */
+    private static float sLastDriven;
+    private static float sLastShade;
+    private static float sLastCentre;
+
+    /**
+     * Logs a progress that falls from well open to shut in one step, with both panels' values
+     * before and after. A normal close never trips it, so the line only appears for the case the
+     * fade-out floor in ShadeBackdrop exists for, and says which panel's signal jumped.
+     */
+    private static void noteCut(float f, boolean allowed) {
+        final float shown = allowed ? f : 0f;
+        if (sLastDriven >= 0.2f && shown <= 0f) {
+            Xp.log(TAG + "progress cut from " + sLastDriven + " (shade " + sLastShade
+                    + ", centre " + sLastCentre + ") to shade " + sExpansion + ", centre "
+                    + sCentreExpansion + (allowed ? "" : ", not allowed"));
+        }
+        sLastDriven = shown;
+        sLastShade = sExpansion;
+        sLastCentre = sCentreExpansion;
     }
 
     private static float clamp01(float f) {
