@@ -718,6 +718,19 @@ public class Main extends XposedModule {
                 forgetClockRoots();
                 forgetGlyphBox();
                 ClockCollapse.onAttached();
+                // A rebuilt keyguard has a new foreground layer, and a restored cover mode came
+                // on before there was any keyguard to put the lyrics in. Posted: adding a view
+                // from inside the tree's own attach dispatch is not something to rely on.
+                main().post(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            LockLyrics.refresh();
+                        } catch (Throwable t) {
+                            Xp.log(TAG + "lyrics refresh failed: " + t);
+                        }
+                    }
+                });
                 return result;
             });
         } catch (Throwable t) {
@@ -742,6 +755,27 @@ public class Main extends XposedModule {
             });
         } catch (Throwable t) {
             Xp.log(TAG + "onDetachedFromWindow hook failed: " + t);
+        }
+
+        // The lock screen lyrics' HDR highlight needs the shade window in HDR colour mode, and that
+        // window's attributes are rebuilt from mLpChanged on every apply - so the mode is written
+        // into mLpChanged right before each one, not set once and overwritten on the next.
+        try {
+            Class<?> nsw = Xp.findClass(
+                    "com.android.systemui.shade.NotificationShadeWindowControllerImpl", cl);
+            Xp.hookAll(nsw, "applyWindowLayoutParams", chain -> {
+                Object self = chain.getThisObject();
+                try {
+                    LockLyrics.noteShadeWindow(self);
+                    LockLyrics.applyHdrTo((android.view.WindowManager.LayoutParams)
+                            Xp.getObjectField(self, "mLpChanged"));
+                } catch (Throwable t) {
+                    Xp.log(TAG + "lyrics HDR not applied: " + t);
+                }
+                return chain.proceed();
+            });
+        } catch (Throwable t) {
+            Xp.log(TAG + "shade window hook failed, lyrics stay SDR: " + t);
         }
 
         // The keyguard service hears about sleep and wake before anything is laid out for either.
@@ -1211,6 +1245,9 @@ public class Main extends XposedModule {
                     + ShadeLayer.dumpCfg()
                     + "\nfadewp=" + (sFadeWp ? 1 : 0)
                     + "\nhidefp=" + (sHideFp ? 1 : 0)
+                    + "\nlyrics=" + (LockLyrics.sEnabled ? 1 : 0)
+                    + "\nlyrickeep=" + (LockLyrics.sKeepOn ? 1 : 0)
+                    + "\nlyrichdr=" + (LockLyrics.sHdr ? 1 : 0)
                     + "\nfpavoid=" + sFpAvoid
                     // Not a setting - a measurement. Kept so the app's preview is to scale from
                     // the first frame after a SystemUI restart, instead of only once the phone
@@ -1275,6 +1312,9 @@ public class Main extends XposedModule {
                     else if ("tap".equals(k)) sTapToggle = "1".equals(v);
                     else if ("fadewp".equals(k)) sFadeWp = "1".equals(v);
                     else if ("hidefp".equals(k)) sHideFp = "1".equals(v);
+                    else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
+                    else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
+                    else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
                     else if ("fpavoid".equals(k)) sFpAvoid = Integer.parseInt(v);
                     else if (k.startsWith("shade_")) {
                         // The whole shade settings page, in one prefix - the keys and their
@@ -1404,6 +1444,8 @@ public class Main extends XposedModule {
                         // The wallpaper process, on its start or when asked, saying what it can
                         // take. See sWpComposes.
                         boolean composes = i.getBooleanExtra("composes", false);
+                        // A restarted wallpaper process has forgotten the lyrics' blur.
+                        LockLyrics.resendBlur();
                         if (composes != sWpComposes) {
                             sWpComposes = composes;
                             Xp.log(TAG + "wallpaper process "
@@ -1468,6 +1510,46 @@ public class Main extends XposedModule {
                         c.sendBroadcast(wp);
                         Xp.log(TAG + "texture fit to screen " + (sTexFit ? "ON" : "off")
                                 + " (wallpaper re-fit " + (sTexFit ? "skipped" : "enabled") + ")");
+                    } else if ("lyrics".equals(op)) {
+                        boolean on = i.getBooleanExtra("on", !LockLyrics.sEnabled);
+                        LockLyrics.setEnabled(on, sTrackKey, sWatched);
+                        saveState();
+                    } else if ("lyrichdr".equals(op)) {
+                        LockLyrics.sHdr = i.getBooleanExtra("on", !LockLyrics.sHdr);
+                        Xp.log(TAG + "lyrics HDR highlight: " + LockLyrics.sHdr);
+                        LockLyrics.refresh();
+                        saveState();
+                    } else if ("lyricinfo".equals(op)) {
+                        // The playing session's metadata, every string key, with lyricInfo written
+                        // out whole - to see how a player marks who sings which line.
+                        setResultData(LockLyrics.dumpMetadata(c, sWatched));
+                    } else if ("lyrickeep".equals(op)) {
+                        LockLyrics.sKeepOn = i.getBooleanExtra("on", !LockLyrics.sKeepOn);
+                        Xp.log(TAG + "lyrics keep the screen on: " + LockLyrics.sKeepOn);
+                        LockLyrics.refresh();
+                        saveState();
+                    } else if ("lyricdemo".equals(op)) {
+                        // Plays a database file by id on its own clock, whatever is playing:
+                        //   --es id 101126 [--ez am true]   or   --ez clear true
+                        // Cover mode still has to be on - that is what puts the view up.
+                        if (i.getBooleanExtra("clear", false)) {
+                            LockLyrics.endDemo(sTrackKey, sWatched);
+                        } else {
+                            String id = i.getStringExtra("id");
+                            LockLyrics.demo(id == null ? "101126" : id,
+                                    i.getBooleanExtra("am", false));
+                        }
+                    } else if ("looper".equals(op)) {
+                        // What is queued on the main thread, grouped by where it came from. An ANR
+                        // (2026-09-16 04:10) spent its last seconds in removeCallbacksAndMessages,
+                        // which is only slow over a very long queue - this says whose it is.
+                        setResultData(looperCensus());
+                    } else if ("lyricstate".equals(op)) {
+                        String st = LockLyrics.describe();
+                        Xp.log(TAG + "lyrics: " + st);
+                        // Also as the broadcast's result, which `am broadcast` prints: on a
+                        // phone whose LSPosed log drops INFO lines this is the only way to read it.
+                        setResultData(st);
                     } else if ("hidefp".equals(op)) {
                         sHideFp = i.getBooleanExtra("on", !sHideFp);
                         saveState();
@@ -1618,6 +1700,9 @@ public class Main extends XposedModule {
                         out.putBoolean("tap", sTapToggle);
                         out.putBoolean("fadewp", sFadeWp);
                         out.putBoolean("hidefp", sHideFp);
+                        out.putBoolean("lyrics", LockLyrics.sEnabled);
+                        out.putBoolean("lyrickeep", LockLyrics.sKeepOn);
+                        out.putBoolean("lyrichdr", LockLyrics.sHdr);
                         out.putInt("fpavoid", sFpAvoid);
                         // Everything the app's preview needs to be to scale. It draws a lock
                         // screen it cannot see, and every one of these is device-specific, so
@@ -1682,6 +1767,7 @@ public class Main extends XposedModule {
                                 + " wallpaperFade=" + sFadeWp);
                     } else if ("verbose".equals(op)) {
                         sVerbose = i.getBooleanExtra("on", !sVerbose);
+                        LockLyrics.verbose = sVerbose;
                         Xp.log(TAG + "verbose=" + sVerbose);
                     } else {
                         Xp.log(TAG + "unknown op " + op);
@@ -1782,6 +1868,11 @@ public class Main extends XposedModule {
      * can read.
      */
     private static volatile boolean sScreenOn = true;
+
+    /** The cached reading, for LockLyrics' per-frame questions. */
+    static boolean screenOnCached() {
+        return sScreenOn;
+    }
 
     /**
      * The clock squeeze's one entry point, resolved by shape.
@@ -4882,6 +4973,52 @@ public class Main extends XposedModule {
      * this broadcast sits in the background queue and took a measured ~500ms to reach the
      * wallpaper process, which is more than composing and uploading the picture put together.
      */
+    /** The main looper's queue, counted by callback or target and what, largest first. */
+    private static String looperCensus() {
+        final java.util.HashMap<String, Integer> counts = new java.util.HashMap<>();
+        final int[] total = {0};
+        Looper.getMainLooper().dump(new android.util.Printer() {
+            @Override
+            public void println(String x) {
+                int m = x.indexOf("Message ");
+                if (m < 0 || x.indexOf('{', m) < 0) return;
+                total[0]++;
+                String key;
+                int cb = x.indexOf("callback=");
+                if (cb >= 0) {
+                    int end = x.indexOf(' ', cb);
+                    key = "cb " + x.substring(cb + 9, end < 0 ? x.length() : end);
+                } else {
+                    int tg = x.indexOf("target=");
+                    int wt = x.indexOf("what=");
+                    int end = tg < 0 ? -1 : x.indexOf(' ', tg);
+                    key = (tg < 0 ? "?" : x.substring(tg + 7, end < 0 ? x.length() : end))
+                            + (wt < 0 ? "" : " " + x.substring(wt, Math.min(x.length(),
+                                    x.indexOf(' ', wt) < 0 ? x.length() : x.indexOf(' ', wt))));
+                }
+                Integer v = counts.get(key);
+                counts.put(key, v == null ? 1 : v + 1);
+            }
+        }, "");
+        java.util.ArrayList<java.util.Map.Entry<String, Integer>> list =
+                new java.util.ArrayList<>(counts.entrySet());
+        java.util.Collections.sort(list, (a, b) -> b.getValue() - a.getValue());
+        StringBuilder sb = new StringBuilder("queued=" + total[0]);
+        for (int k = 0; k < Math.min(12, list.size()); k++) {
+            sb.append(" | ").append(list.get(k).getValue()).append(" x ").append(list.get(k).getKey());
+        }
+        return sb.toString();
+    }
+
+    /** One switch to the wallpaper process, for callers outside this file. */
+    static void sendToWallpaper(String op, boolean on) {
+        Context c = sAppCtx;
+        if (c == null) return;
+        Intent out = wallpaperIntent(op);
+        out.putExtra("on", on);
+        c.sendBroadcast(out);
+    }
+
     private static Intent wallpaperIntent(String op) {
         Intent out = new Intent("com.os4.musiccover.WPROBE");
         out.setPackage("com.miui.miwallpaper");
@@ -4965,7 +5102,7 @@ public class Main extends XposedModule {
         return sWork;
     }
 
-    private static Handler main() {
+    static Handler main() {
         if (sMain == null) sMain = new Handler(Looper.getMainLooper());
         return sMain;
     }
@@ -5819,6 +5956,7 @@ public class Main extends XposedModule {
         // The wallpaper process cannot remember this one across a restart, and this is the
         // first moment of a transition it matters for. See pushFadeMs().
         pushFadeMs(sAppCtx);
+        LockLyrics.attach();
         saveState();
     }
 
@@ -5847,6 +5985,8 @@ public class Main extends XposedModule {
         // guard is what draws every frame of the thumbnail coming back. onClockReleased() hands
         // the card back when the clock lands.
         if (!ClockCollapse.active()) onClockReleased();
+        // The lyrics fade out on their own and leave the keyguard once they have.
+        LockLyrics.refresh();
         saveState();
     }
 
@@ -6148,7 +6288,7 @@ public class Main extends XposedModule {
     /** How long the card has to hold still before its position is believed. */
     private static final long CARD_SETTLE_MS = 400L;
 
-    private static View findSysuiView(String id) {
+    static View findSysuiView(String id) {
         View v = sContainer;
         if (v == null) return null;
         View root = v.getRootView();
@@ -6977,6 +7117,11 @@ public class Main extends XposedModule {
                     }
 
                     @Override
+                    public void onPlaybackStateChanged(PlaybackState state) {
+                        LockLyrics.onPlaybackState(state);
+                    }
+
+                    @Override
                     public void onSessionDestroyed() {
                         rebindSession();
                     }
@@ -7031,6 +7176,9 @@ public class Main extends XposedModule {
         if (sCoverMode && key.equals(sTrackKey)) return;
         sTrackKey = key;
         Xp.log(TAG + "card track: " + key);
+        // Started here rather than once the cover has settled, so the fetch overlaps the
+        // transition instead of following it.
+        LockLyrics.onTrack(key, sWatched);
         if (sCoverMode) pushArtAsync(true, true);
         else setCoverEnabled(true, true);
     }
@@ -7398,7 +7546,7 @@ public class Main extends XposedModule {
     }
 
     /** The cover's colour, or 0 when there is nothing to take one from. */
-    private static int coverTint() {
+    static int coverTint() {
         // The screen check is the AOD one. Cover mode outlives the display going off, and the
         // glyphs are the same TimeViews in the always-on view: the cover's colour describes a
         // picture the AOD is not drawn on, and repainting those glyphs in it is the one way this

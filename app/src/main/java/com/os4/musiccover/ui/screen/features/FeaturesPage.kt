@@ -218,10 +218,12 @@ internal fun CoverPageView(
     }
 
     val enabled = module.alive
+    // The cover has one setting of its own, too few for a tab, and it is about the same picture
+    // the clock sits on - so the two share one. The lyrics get the third.
     val groups = listOf(
-        stringResource(R.string.cover_section),
-        stringResource(R.string.clock_section),
+        stringResource(R.string.cover_clock_section),
         stringResource(R.string.card_section),
+        stringResource(R.string.lyrics_section),
     )
 
     PageScaffold(
@@ -264,11 +266,14 @@ internal fun CoverPageView(
                 modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)
             ) {
                 when (group) {
-                    0 -> CoverGroup(enabled, module) { module = it }
-                    1 -> ClockGroup(enabled, module) { module = it }
-                    else -> CardGroup(enabled, module, { module = it }) {
+                    0 -> Column {
+                        CoverGroup(enabled, module) { module = it }
+                        ClockGroup(enabled, module) { module = it }
+                    }
+                    1 -> CardGroup(enabled, module, { module = it }) {
                         shotNonce++
                     }
+                    else -> LyricsGroup(enabled, module) { module = it }
                 }
             }
         }
@@ -372,6 +377,47 @@ private fun ClockGroup(
                 val glassEnd = 1f - it
                 onChange(module.copy(glassEnd = glassEnd))
                 ModuleBridge.setGlassEnd(context, glassEnd)
+            },
+        )
+    }
+}
+
+@Composable
+private fun LyricsGroup(
+    enabled: Boolean,
+    module: ModuleBridge.State,
+    onChange: (ModuleBridge.State) -> Unit,
+) {
+    val context = LocalContext.current
+    Column {
+        SwitchPreference(
+            title = stringResource(R.string.lock_lyrics),
+            summary = stringResource(R.string.lock_lyrics_summary),
+            checked = module.lyrics,
+            enabled = enabled,
+            onCheckedChange = {
+                onChange(module.copy(lyrics = it))
+                ModuleBridge.setLyrics(context, it)
+            },
+        )
+        SwitchPreference(
+            title = stringResource(R.string.lyrics_hdr),
+            summary = stringResource(R.string.lyrics_hdr_summary),
+            checked = module.lyricsHdr,
+            enabled = enabled && module.lyrics,
+            onCheckedChange = {
+                onChange(module.copy(lyricsHdr = it))
+                ModuleBridge.setLyricsHdr(context, it)
+            },
+        )
+        SwitchPreference(
+            title = stringResource(R.string.lyrics_keep_on),
+            summary = stringResource(R.string.lyrics_keep_on_summary),
+            checked = module.lyricsKeepOn,
+            enabled = enabled && module.lyrics,
+            onCheckedChange = {
+                onChange(module.copy(lyricsKeepOn = it))
+                ModuleBridge.setLyricsKeepOn(context, it)
             },
         )
     }

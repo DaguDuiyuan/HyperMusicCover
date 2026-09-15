@@ -31,6 +31,9 @@ object SettingsBackup {
     private const val KEY_CARD_CENTER_TEXT = "cardCenterText"
     private const val KEY_CARD_TITLE_TAP = "cardTitleTap"
     private const val KEY_HIDE_FINGERPRINT = "hideFingerprint"
+    private const val KEY_LYRICS = "lyrics"
+    private const val KEY_LYRICS_KEEP_ON = "lyricsKeepOn"
+    private const val KEY_LYRICS_HDR = "lyricsHdr"
     private const val KEY_FP_AVOID = "fingerprintAvoid"
     /** The whole notification-shade page, as one object keyed the way the module names them. */
     private const val KEY_SHADE = "shade"
@@ -51,6 +54,9 @@ object SettingsBackup {
             json.put(KEY_CARD_CENTER_TEXT, module.mcCenterText)
             json.put(KEY_CARD_TITLE_TAP, module.mcTitleTap)
             json.put(KEY_HIDE_FINGERPRINT, module.hideFingerprint)
+            json.put(KEY_LYRICS, module.lyrics)
+            json.put(KEY_LYRICS_KEEP_ON, module.lyricsKeepOn)
+            json.put(KEY_LYRICS_HDR, module.lyricsHdr)
             json.put(KEY_FP_AVOID, module.fpAvoid)
             // Written whole rather than key by key, because the map is built from the module's
             // own list of keys - this file has no idea what is in it, which is the point.
@@ -99,6 +105,15 @@ object SettingsBackup {
             }
             if (obj.has(KEY_HIDE_FINGERPRINT)) {
                 ModuleBridge.setHideFingerprint(context, obj.getBoolean(KEY_HIDE_FINGERPRINT))
+            }
+            if (obj.has(KEY_LYRICS)) {
+                ModuleBridge.setLyrics(context, obj.getBoolean(KEY_LYRICS))
+            }
+            if (obj.has(KEY_LYRICS_HDR)) {
+                ModuleBridge.setLyricsHdr(context, obj.getBoolean(KEY_LYRICS_HDR))
+            }
+            if (obj.has(KEY_LYRICS_KEEP_ON)) {
+                ModuleBridge.setLyricsKeepOn(context, obj.getBoolean(KEY_LYRICS_KEEP_ON))
             }
             if (obj.has(KEY_FP_AVOID)) {
                 ModuleBridge.setFingerprintAvoid(context, obj.getInt(KEY_FP_AVOID))

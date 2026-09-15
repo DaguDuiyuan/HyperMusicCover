@@ -78,6 +78,12 @@ object ModuleBridge {
         val mcCenterText: Boolean = false,
         val mcTitleTap: Boolean = false,
         val hideFingerprint: Boolean = false,
+        /** Lock screen lyrics, between the collapsed clock and the card. */
+        val lyrics: Boolean = false,
+        /** Keep the screen lit while lock screen lyrics are playing. */
+        val lyricsKeepOn: Boolean = false,
+        /** Draw the singing words brighter than white on an HDR screen. */
+        val lyricsHdr: Boolean = false,
         /** 0 system default, 1 never avoid the fingerprint icon, 2 always avoid it. */
         val fpAvoid: Int = 0,
         /**
@@ -190,6 +196,15 @@ object ModuleBridge {
     // wire would make moving it later a protocol change.
     fun setHideFingerprint(context: Context, on: Boolean) =
         send(context, "hidefp") { putExtra("on", on) }
+
+    fun setLyrics(context: Context, on: Boolean) =
+        send(context, "lyrics") { putExtra("on", on) }
+
+    fun setLyricsHdr(context: Context, on: Boolean) =
+        send(context, "lyrichdr") { putExtra("on", on) }
+
+    fun setLyricsKeepOn(context: Context, on: Boolean) =
+        send(context, "lyrickeep") { putExtra("on", on) }
 
     fun setFingerprintAvoid(context: Context, mode: Int) =
         send(context, "fpavoid") { putExtra("mode", mode) }
@@ -406,6 +421,9 @@ object ModuleBridge {
             mcCenterText = b.getBoolean("mctext", false),
             mcTitleTap = b.getBoolean("mctap", false),
             hideFingerprint = b.getBoolean("hidefp", false),
+            lyrics = b.getBoolean("lyrics", false),
+            lyricsKeepOn = b.getBoolean("lyrickeep", false),
+            lyricsHdr = b.getBoolean("lyrichdr", false),
             fpAvoid = b.getInt("fpavoid", 0),
             shade = b.keySet()
                 .filter { it.startsWith("shade_") }

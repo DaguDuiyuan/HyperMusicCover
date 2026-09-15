@@ -16,6 +16,8 @@
     <string name="cover_bias">Vertical position</string>
     <string name="cover_bias_summary">0 is flush with the top, 0.5 is centred</string>
     <string name="clock_section">Clock</string>
+    <string name="cover_clock_section">Cover &amp; clock</string>
+    <string name="lyrics_section">Lyrics</string>
     <string name="clock_height">Clock height</string>
     <string name="clock_height_summary">Moves the date and clock together; positive is down</string>
     <string name="clock_size">Clock size</string>
@@ -100,6 +102,12 @@
     <string name="card_hide_art">Hide the thumbnail</string>
     <string name="card_center_text">Centre the title</string>
     <string name="card_title_tap">Tap the title to pause</string>
+    <string name="lock_lyrics">Lock screen lyrics</string>
+    <string name="lock_lyrics_summary">Shows lyrics between the clock and the card in cover mode. Needs network</string>
+    <string name="lyrics_hdr">HDR highlight</string>
+    <string name="lyrics_hdr_summary">The glow at the end of a held note goes brighter than white on an HDR screen</string>
+    <string name="lyrics_keep_on">Keep the screen on for lyrics</string>
+    <string name="lyrics_keep_on_summary">The lock screen stays lit while lyrics are showing and music plays. Sleeps again when paused</string>
     <string name="hide_fingerprint">Hide lock screen fingerprint icon</string>
     <string name="fp_avoid">Notifications avoid fingerprint</string>
     <string name="fp_avoid_summary">Applies after restarting System UI</string>

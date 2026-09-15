@@ -87,6 +87,15 @@ public class WallpaperProbe {
     private static volatile Bitmap sArt;
 
     /**
+     * SystemUI is showing lyrics over the cover, so the cover is drawn frosted - blurred and
+     * darkened - wherever it would be drawn sharp. Applied inside fittedArt(), which every path
+     * (upload, getBitmap short-circuit, both fade ends) already reads, so a track change under
+     * the lyrics fades frosted to frosted with nothing else knowing. Cleared when the cover goes.
+     */
+    private static volatile boolean sLyricBlur;
+    private static Bitmap sFrosted, sFrostedOf;
+
+    /**
      * The keyguard engine, captured so a new track can re-run the texture upload without the
      * process being killed. Its GL work all happens on one HandlerThread; nothing here touches
      * GL directly, it only asks the engine to run its own surface-created path again.
@@ -594,6 +603,7 @@ public class WallpaperProbe {
                             sFitted = fitted;
                             sFittedOf = art;
                         }
+                        fitted = frostedIfWanted(fitted);
                         args[0] = fitted;
                         Xp.log(TAG + "wallpaper texture REPLACED " + describe(orig)
                                 + " -> " + describe(fitted)
@@ -934,6 +944,27 @@ public class WallpaperProbe {
      * unknown. Cached, so a track change scales once rather than on every GL callback.
      */
     private static Bitmap fittedArt() {
+        return frostedIfWanted(sharpFittedArt());
+    }
+
+    private static Bitmap frostedIfWanted(Bitmap sharp) {
+        return sharp == null || !sLyricBlur ? sharp : frostedOf(sharp);
+    }
+
+    /** The frosted copy of one fitted picture, made once. Called off the GL thread first. */
+    private static synchronized Bitmap frostedOf(Bitmap sharp) {
+        Bitmap f = sFrosted;
+        if (f != null && sFrostedOf == sharp && !f.isRecycled()) return f;
+        long t0 = SystemClock.uptimeMillis();
+        f = CoverCompose.frosted(sharp);
+        sFrosted = f;
+        sFrostedOf = sharp;
+        Xp.log(TAG + "frosted " + describe(sharp) + " in " + (SystemClock.uptimeMillis() - t0)
+                + "ms");
+        return f;
+    }
+
+    private static Bitmap sharpFittedArt() {
         Bitmap art = sArt;
         if (art == null || sReportedW <= 0 || sReportedH <= 0) return null;
         if (art.getWidth() == sReportedW && art.getHeight() == sReportedH) return art;
@@ -1621,6 +1652,7 @@ public class WallpaperProbe {
                                         sArt = null;
                                         sFitted = null;
                                         sFittedOf = null;
+                                        sLyricBlur = false;
                                         new File(cc.getFilesDir(), ART_FILE).delete();
                                         new File(cc.getFilesDir(), SRC_FILE).delete();
                                         Xp.log(TAG + "art cleared");
@@ -1629,6 +1661,7 @@ public class WallpaperProbe {
                                 return;
                             }
                             sArt = null;
+                            sLyricBlur = false;
                             new File(c.getFilesDir(), ART_FILE).delete();
                             new File(c.getFilesDir(), SRC_FILE).delete();
                             Xp.log(TAG + "art cleared");
@@ -1676,6 +1709,8 @@ public class WallpaperProbe {
                                     : "off - desktop wallpaper back to its own picture"));
                             reloadDesktopTexture();
                         }
+                    } else if ("lyricblur".equals(op)) {
+                        setLyricBlur(i.getBooleanExtra("on", false));
                     } else if ("reload".equals(op)) {
                         reloadTexture();
                     } else if ("fadems".equals(op)) {
@@ -1720,6 +1755,42 @@ public class WallpaperProbe {
         // Unprompted as well as when asked: a restart of this process alone would otherwise
         // leave SystemUI on whatever it last heard, which may be nothing.
         sayHello(ctx);
+    }
+
+    /**
+     * Frosts the cover for the lyrics, or clears it. The blur is made on the composer thread; the
+     * fade waits for one already in the air - the cover arriving, a track changing - to land
+     * first, because a new fade starts from the picture it is handed, not from what is on screen.
+     */
+    private static void setLyricBlur(final boolean on) {
+        composer().post(new Runnable() {
+            @Override
+            public void run() {
+                Bitmap sharp = sharpFittedArt();
+                if (on && sharp != null) frostedOf(sharp);
+                final long t0 = SystemClock.uptimeMillis();
+                final Handler h = new Handler(Looper.getMainLooper());
+                h.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (on == sLyricBlur) return;
+                        if ((sFade != null || sGpuFade != null)
+                                && SystemClock.uptimeMillis() - t0 < 1500L) {
+                            h.postDelayed(this, 30L);
+                            return;
+                        }
+                        Bitmap from = fittedArt();
+                        sLyricBlur = on;
+                        Bitmap to = fittedArt();
+                        Xp.log(TAG + "lyric blur " + (on ? "on" : "off") + " (waited "
+                                + (SystemClock.uptimeMillis() - t0) + "ms)");
+                        if (sArt == null || videoPath()) return;
+                        if (from != null && to != null) startFade(from, to, null);
+                        else reloadTexture();
+                    }
+                });
+            }
+        });
     }
 
     /** Tells SystemUI this build composes covers from their source. See Main.sWpComposes. */

@@ -251,6 +251,27 @@ final class CoverCompose {
     }
 
     /**
+     * The cover behind the lock screen lyrics: the same picture at the same size, blurred until
+     * only its colour is left and darkened so white text reads over any of it. Saturation goes up
+     * a little first, because darkening alone turns a bright cover grey.
+     */
+    static Bitmap frosted(Bitmap src) {
+        int w = src.getWidth(), h = src.getHeight();
+        Bitmap soft = blur(src, 36, 3, 3);
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(out);
+        android.graphics.Paint p = new android.graphics.Paint(
+                android.graphics.Paint.FILTER_BITMAP_FLAG);
+        android.graphics.ColorMatrix cm = new android.graphics.ColorMatrix();
+        cm.setSaturation(1.3f);
+        p.setColorFilter(new android.graphics.ColorMatrixColorFilter(cm));
+        cv.drawBitmap(soft, null, new android.graphics.RectF(0, 0, w, h), p);
+        cv.drawColor(0x61000000);
+        if (soft != src) soft.recycle();
+        return out;
+    }
+
+    /**
      * Downscaling hard and letting one bilinear upscale smear it back is not a blur - it leaves
      * the tell-tale blocky diamonds of interpolating a tiny image. Halve step by step (each
      * halving is a box average), run a real separable box blur at the small size where it costs

@@ -105,7 +105,19 @@ final class ClockCollapse {
                 + " oemY avg=" + sPerfYNs / n / 1000 + "us max=" + sPerfYMax / 1000 + "us";
     }
 
+    /** The bottom of the clock's ink as last placed, in screen pixels. */
+    private static volatile float sInkBottom = Float.NaN;
+
     // ------------------------------------------------------------------ public surface
+
+    /**
+     * Where the clock ends on screen this frame, for the lyrics to sit under. NaN while nothing
+     * of ours is on the clock - the AOD's full clock is the OEM's, and nothing may sit under it.
+     */
+    static float inkBottomOnScreen() {
+        Phase p = sPhase;
+        return p == Phase.OFF || p == Phase.AOD ? Float.NaN : sInkBottom;
+    }
 
     static Phase phase() {
         return sPhase;
@@ -1241,6 +1253,7 @@ final class ClockCollapse {
         }
 
         float scale = unit / m.unit;
+        sInkBottom = top + m.box.height() * scale;
         float scaleX = scale;
         if (phase == Phase.ENTER && sGlyphTail && m.box.width() > 0f) {
             // The OEM's glyph aspect is not monotonic along the walk - measured 1.47 -> 1.68 ->
