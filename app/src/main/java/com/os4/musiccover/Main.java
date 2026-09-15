@@ -1574,6 +1574,16 @@ public class Main extends XposedModule {
                         if (i.hasExtra("bias")) sBias = clamp01(i.getFloatExtra("bias", sBias));
                         sTrackKey = on ? trackKey(pickController(c)) : "";
                         setCoverEnabled(on, anim, false);
+                    } else if ("wphello".equals(op)) {
+                        // The wallpaper process, on its start or when asked, saying what it can
+                        // take. See sWpComposes.
+                        boolean composes = i.getBooleanExtra("composes", false);
+                        if (composes != sWpComposes) {
+                            sWpComposes = composes;
+                            Xp.log(TAG + "wallpaper process "
+                                    + (composes ? "composes covers itself, sending the source"
+                                    : "wants the composed JPEG"));
+                        }
                     } else if ("needart".equals(op)) {
                         // The wallpaper process came up with nothing to draw - see
                         // WallpaperProbe.askForArt(). It asks once per process start, and there
@@ -1906,6 +1916,13 @@ public class Main extends XposedModule {
         };
         ctx.registerReceiver(r, new IntentFilter(ACTION), Context.RECEIVER_EXPORTED);
         Xp.log(TAG + "receiver registered for " + ACTION);
+        // Asks the wallpaper process what it can take, now that there is a receiver for the
+        // answer. A build that predates the question never answers, which is the answer.
+        try {
+            ctx.sendBroadcast(wallpaperIntent("hello"));
+        } catch (Throwable t) {
+            Xp.log(TAG + "hello to the wallpaper process failed: " + t);
+        }
         loadState();
         // The icon views can already exist by now - the file is read when the keyguard attaches,
         // which is not necessarily before the fingerprint view is built.
@@ -6141,6 +6158,45 @@ public class Main extends XposedModule {
         }
         if (art == null) { Xp.log(TAG + "pushart: no album art"); return; }
         int w = sScreenW, h = sScreenH;
+        if (!sVideoWallpaper && sWpComposes) {
+            // The source goes over instead of the composed picture, and the wallpaper process
+            // composes it for itself. Measured before this, on the path below: composing took
+            // 27-94ms and the JPEG 47-185ms, all of it in front of the broadcast, and the other
+            // side then spent 14-36ms decoding. The player's artwork is 512x512, so its raw
+            // pixels are a 1MB write and no encode at all, and composing it in the wallpaper
+            // process also takes that work off SystemUI while the clock is springing.
+            Bitmap src = null;
+            String shared = null;
+            try {
+                src = CoverCompose.prepareSource(art, w);
+                shared = writeSharedSource(src, w, h, sBias);
+            } catch (Throwable t) {
+                Xp.log(TAG + "source hand-over failed, sending the composed JPEG instead: " + t);
+            }
+            if (shared != null) {
+                out.putExtra("src", shared);
+                ctx.sendBroadcast(out);
+                long sent = android.os.SystemClock.uptimeMillis();
+                // Still composed here, but now after the send: the clock's tint and the shade
+                // both need the picture, and neither of them is what the user is waiting on.
+                // Same source, size and bias as the wallpaper process got, so the same pixels.
+                Bitmap full;
+                try {
+                    full = composeWallpaper(src, w, h, sBias);
+                } catch (Throwable t) {
+                    Xp.log(TAG + "composeWallpaper failed after the hand-over: " + t);
+                    return;
+                }
+                measureCover(full);
+                if (sCoverMode) recolorClock();
+                setShadeArt(shadePicture(src, w, h, full));
+                Xp.log(TAG + "pushart " + w + "x" + h + " bias=" + sBias + " as a "
+                        + src.getWidth() + "x" + src.getHeight() + " source, sent in "
+                        + (sent - t0) + "ms, own copy composed in "
+                        + (android.os.SystemClock.uptimeMillis() - sent) + "ms");
+                return;
+            }
+        }
         Bitmap full;
         try {
             full = composeWallpaper(art, w, h, sBias);
@@ -6612,6 +6668,27 @@ public class Main extends XposedModule {
             Xp.log(TAG + "shared art write failed, carrying it in the broadcast: " + t);
             return null;
         }
+    }
+
+    /**
+     * Whether the wallpaper process composes covers itself, as said by that process.
+     *
+     * Asked rather than assumed, because the two processes run the module's code from whenever
+     * each last started. After an update that restarted SystemUI but not the wallpaper, the
+     * wallpaper still runs the old build, which understands only the composed JPEG - a source
+     * sent to it would leave the lock screen without a cover. So the source goes over only once
+     * the process on the other end has said it knows what to do with one.
+     */
+    private static volatile boolean sWpComposes;
+
+    static final String SHARE_SOURCE = "mc_src.raw";
+
+    /** The source, where the wallpaper process can read it. See CoverCompose.writeSource(). */
+    private static String writeSharedSource(Bitmap src, int w, int h, float bias)
+            throws java.io.IOException {
+        java.io.File f = new java.io.File(SHARE_DIR, SHARE_SOURCE);
+        CoverCompose.writeSource(f, src, w, h, bias);
+        return f.getAbsolutePath();
     }
 
     private static void pushArtAsync(final boolean on, final boolean fresh) {
@@ -9284,196 +9361,9 @@ public class Main extends XposedModule {
         return id == 0 ? null : v.getRootView().findViewById(id);
     }
 
-    /**
-     * Lays the cover out the way the Apple reference does: the artwork sharp at full width and
-     * its own aspect, with a heavily blurred copy filling the screen above and below it.
-     * Center-cropping a square cover into a 1200x2608 screen instead zooms ~5x and throws most
-     * of the artwork away - on the Lover cover it cut the face in half.
-     *
-     * bias places the sharp band in the leftover vertical space: 0 flush with the top, 0.5
-     * centred, 1 flush with the bottom. Centred is what the media card covers, so the default
-     * sits above that.
-     */
+    /** See CoverCompose.composeWallpaper(); kept here so the call sites read as they did. */
     private static Bitmap composeWallpaper(Bitmap src, int w, int h, float bias) {
-        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas cv = new android.graphics.Canvas(out);
-        android.graphics.Paint p = new android.graphics.Paint(
-                android.graphics.Paint.FILTER_BITMAP_FLAG);
-
-        float coverH = src.getHeight() * (w / (float) src.getWidth());
-        if (bias < 0f) bias = 0f;
-        if (bias > 1f) bias = 1f;
-        float top = (h - coverH) * bias;
-
-        // Blurring a centre-crop gave a muddy wash whose colours did not meet the sharp cover at
-        // the seam. Extend the artwork by MIRRORING it above and below instead: the rows either
-        // side of a seam are then the same row of the artwork, so the join is continuous by
-        // construction, and the blur keeps local colour instead of averaging the whole image.
-        int bw = Math.max(1, w / 4), bh = Math.max(1, h / 4);
-        float k = bw / (float) w;
-        // Floored at a pixel: a panorama's band is a fraction of a row, and the loop below counts
-        // copies of it.
-        float cH = Math.max(1f, coverH * k), tp = top * k;
-        Bitmap bg = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas bc = new android.graphics.Canvas(bg);
-        bc.drawBitmap(src, null, new android.graphics.RectF(0, tp, bw, tp + cH), p);
-        // One mirrored copy each way is what this was, and it covers the background only while
-        // the band is a large part of the screen: a square cover puts it at 1200 of 2608 and the
-        // copy reaches both edges. A LANDSCAPE cover does not. Measured on a 960x539 artwork at
-        // the default bias: the band is 674px, the single copy below it ends at 2057, and the
-        // last 551 rows were never painted at all - the blur came out with a black bottom fifth.
-        // The mirror is periodic with 2*coverH either way, so this draws the same picture,
-        // continued until the background runs out.
-        int tiles = Math.min(64, (int) Math.ceil(bh / cH) + 1);
-        for (int i = 1; i <= tiles; i++) {
-            boolean flip = (i % 2) == 1;
-            drawTile(bc, src, bw, cH, tp + i * cH, flip, p);
-            drawTile(bc, src, bw, cH, tp - i * cH, flip, p);
-        }
-
-        Bitmap blurred = blur(bg, 48, 4, 3);
-        cv.drawBitmap(blurred, null, new android.graphics.RectF(0, 0, w, h), p);
-        cv.drawColor(0x14000000);
-        // The sharp band, feathered in its own pixels and then drawn in one go. See feathered().
-        Bitmap band = feathered(src, w, Math.round(coverH),
-                Math.min(240, Math.round(coverH / 4f)));
-        cv.drawBitmap(band, null, new android.graphics.RectF(0, top, w, top + coverH), p);
-        band.recycle();
-        return out;
-    }
-
-    /**
-     * One mirrored copy of the artwork, cH tall with its top edge at y, clipped to the canvas.
-     *
-     * `flip` alternates down the strip, and that is what makes it a mirror rather than a repeat:
-     * every copy is the reflection of the one before it, so the rows either side of a seam are
-     * the same row of the artwork and the join is continuous by construction. Drawing it as a
-     * translate to the tile's own bottom edge plus a vertical scale of -1, into a destination
-     * rect that starts at this canvas's origin, is the same transform the one-copy version used
-     * for both of the copies it drew.
-     */
-    private static void drawTile(android.graphics.Canvas cv, Bitmap src, int bw, float cH,
-                                 float y, boolean flip, android.graphics.Paint p) {
-        if (y > cv.getHeight() || y + cH < 0f) return;
-        if (!flip) {
-            cv.drawBitmap(src, null, new android.graphics.RectF(0, y, bw, y + cH), p);
-            return;
-        }
-        cv.save();
-        cv.translate(0, y + cH);
-        cv.scale(1f, -1f);
-        cv.drawBitmap(src, null, new android.graphics.RectF(0, 0, bw, cH), p);
-        cv.restore();
-    }
-
-    /**
-     * The artwork at full width and its own aspect, with the top and bottom `feather` rows faded
-     * to transparent - in the pixels, not by masking a layer.
-     *
-     * Masking is what this replaces, and it put a one-pixel line along the band's top edge. The
-     * band was drawn into a saveLayer whose bounds begin at a fractional `top`, and the mask
-     * rect over it was snapped to whole pixels by a different rule than the layer was, so the
-     * band's first row could fall outside the mask and land on the blurred background at full
-     * strength - a line that follows the artwork's own brightness, bright where the row below is
-     * bright and dark where it is dark, which is exactly what it looked like on the phone.
-     *
-     * Here the ramp is part of the picture, so that first row has nothing to show whatever the
-     * rounding does. The mask rects are on a bitmap whose edges are 0 and bandH - both whole
-     * pixels - so there is no fractional bound left for anything to disagree about.
-     */
-    private static Bitmap feathered(Bitmap src, int w, int bandH, int feather) {
-        Bitmap band = Bitmap.createBitmap(w, bandH, Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas bc = new android.graphics.Canvas(band);
-        bc.drawBitmap(src, null, new android.graphics.RectF(0, 0, w, bandH),
-                new android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG));
-        if (feather > 0 && feather * 2 <= bandH) {
-            android.graphics.Paint mask = new android.graphics.Paint();
-            mask.setXfermode(new android.graphics.PorterDuffXfermode(
-                    android.graphics.PorterDuff.Mode.DST_IN));
-            mask.setShader(new android.graphics.LinearGradient(0, 0, 0, feather,
-                    0x00000000, 0xFF000000, android.graphics.Shader.TileMode.CLAMP));
-            bc.drawRect(0, 0, w, feather, mask);
-            mask.setShader(new android.graphics.LinearGradient(0, bandH - feather, 0, bandH,
-                    0xFF000000, 0x00000000, android.graphics.Shader.TileMode.CLAMP));
-            bc.drawRect(0, bandH - feather, w, bandH, mask);
-        }
-        return band;
-    }
-
-    /**
-     * Downscaling hard and letting one bilinear upscale smear it back is not a blur - it leaves
-     * the tell-tale blocky diamonds of interpolating a tiny image. Halve step by step (each
-     * halving is a box average), run a real separable box blur at the small size where it costs
-     * almost nothing, then double back up, so nothing is ever interpolated across a big jump.
-     */
-    private static Bitmap blur(Bitmap src, int smallW, int radius, int passes) {
-        Bitmap cur = src;
-        while (cur.getWidth() / 2 > smallW) {
-            Bitmap next = Bitmap.createScaledBitmap(cur,
-                    cur.getWidth() / 2, Math.max(1, cur.getHeight() / 2), true);
-            if (cur != src) cur.recycle();
-            cur = next;
-        }
-        int sh = Math.max(1, cur.getHeight() * smallW / cur.getWidth());
-        Bitmap small = Bitmap.createScaledBitmap(cur, smallW, sh, true);
-        if (cur != src) cur.recycle();
-
-        int n = smallW * sh;
-        int[] a = new int[n], b = new int[n];
-        small.getPixels(a, 0, smallW, 0, 0, smallW, sh);
-        for (int i = 0; i < passes; i++) {
-            boxH(a, b, smallW, sh, radius);
-            boxV(b, a, smallW, sh, radius);
-        }
-        small.setPixels(a, 0, smallW, 0, 0, smallW, sh);
-
-        // Climb back up in doublings; the caller's final draw stretches the last step.
-        Bitmap up = small;
-        while (up.getWidth() * 2 <= src.getWidth()) {
-            Bitmap next = Bitmap.createScaledBitmap(up, up.getWidth() * 2, up.getHeight() * 2, true);
-            if (up != small) up.recycle();
-            up = next;
-        }
-        if (up != small) small.recycle();
-        return up;
-    }
-
-    private static void boxH(int[] src, int[] dst, int w, int h, int r) {
-        int n = 2 * r + 1;
-        for (int y = 0; y < h; y++) {
-            int base = y * w, sr = 0, sg = 0, sb = 0;
-            for (int i = -r; i <= r; i++) {
-                int c = src[base + Math.min(w - 1, Math.max(0, i))];
-                sr += (c >> 16) & 0xff; sg += (c >> 8) & 0xff; sb += c & 0xff;
-            }
-            for (int x = 0; x < w; x++) {
-                dst[base + x] = 0xFF000000 | ((sr / n) << 16) | ((sg / n) << 8) | (sb / n);
-                int o = src[base + Math.min(w - 1, Math.max(0, x - r))];
-                int in = src[base + Math.min(w - 1, Math.max(0, x + r + 1))];
-                sr += ((in >> 16) & 0xff) - ((o >> 16) & 0xff);
-                sg += ((in >> 8) & 0xff) - ((o >> 8) & 0xff);
-                sb += (in & 0xff) - (o & 0xff);
-            }
-        }
-    }
-
-    private static void boxV(int[] src, int[] dst, int w, int h, int r) {
-        int n = 2 * r + 1;
-        for (int x = 0; x < w; x++) {
-            int sr = 0, sg = 0, sb = 0;
-            for (int i = -r; i <= r; i++) {
-                int c = src[Math.min(h - 1, Math.max(0, i)) * w + x];
-                sr += (c >> 16) & 0xff; sg += (c >> 8) & 0xff; sb += c & 0xff;
-            }
-            for (int y = 0; y < h; y++) {
-                dst[y * w + x] = 0xFF000000 | ((sr / n) << 16) | ((sg / n) << 8) | (sb / n);
-                int o = src[Math.min(h - 1, Math.max(0, y - r)) * w + x];
-                int in = src[Math.min(h - 1, Math.max(0, y + r + 1)) * w + x];
-                sr += ((in >> 16) & 0xff) - ((o >> 16) & 0xff);
-                sg += ((in >> 8) & 0xff) - ((o >> 8) & 0xff);
-                sb += (in & 0xff) - (o & 0xff);
-            }
-        }
+        return CoverCompose.composeWallpaper(src, w, h, bias);
     }
 
     /** Fills w x h from the source without distorting it, the way CENTER_CROP would. */
