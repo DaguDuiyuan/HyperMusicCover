@@ -232,6 +232,10 @@ final class LyricView extends View {
     private final java.util.HashSet<Integer> blurPending = new java.util.HashSet<>();
     /** Bumped by every rebuild, so a picture made for the previous layout is thrown away. */
     private int buildGen;
+    /** The lines and width a layout is on its way for, or -1 with none in the air. */
+    private int wantVersion = -1, wantWidth = -1;
+    /** Diagnostics: how long the last layout took on its thread. */
+    private long layoutMs;
     /** From this distance on the blur is wide enough to be made at a quarter of the resolution. */
     private static final int BLUR_QUARTER_ROWS = 3;
     private final android.graphics.RectF bmpDst = new android.graphics.RectF();
@@ -368,10 +372,15 @@ final class LyricView extends View {
         boolean changed = false;
         int why = 0;
         // Not before the first layout: a width of zero would wrap every line a character a row.
-        if (getWidth() > 0 && (LockLyrics.version() != version || getWidth() != layoutWidth)) {
-            rebuild();
-            changed = true;
-            why |= 1;
+        // Leaving, the lines are frozen like the band below: switching the lyrics off empties
+        // them, and laying the empty set out at once cut the lines off in one frame instead of
+        // letting them fade.
+        if (getWidth() > 0 && (LockLyrics.version() != version || getWidth() != layoutWidth)
+                && (LockLyrics.wantsAttached() || show == 0f)) {
+            if (layOut()) {
+                changed = true;
+                why |= 1;
+            }
         }
         // Leaving, the band is frozen where it was: following the clock as it grows would drag
         // the fading lines up through it.
@@ -389,7 +398,9 @@ final class LyricView extends View {
             why |= 4;
         }
         if (show == 0f && showTo == 0f && !LockLyrics.wantsAttached()) {
-            // Faded out with nothing to come back for: leave the keyguard's tree.
+            // Faded out with nothing to come back for: leave the keyguard's tree, and let the
+            // frozen lines and their pictures go if the switch emptied them.
+            if (LockLyrics.lines().isEmpty() && !lines.isEmpty()) layOut();
             post(new Runnable() {
                 @Override
                 public void run() {
@@ -728,22 +739,153 @@ final class LyricView extends View {
         }
     }
 
-    /** New lines, or a new width: lay every line out once. */
-    private void rebuild() {
-        version = LockLyrics.version();
-        lines = LockLyrics.lines();
-        layoutWidth = getWidth();
+    /**
+     * New lines, or a new width: lay every line out once. Returns whether the new layout is in
+     * place already - only an empty one is; the rest is laid out on a thread of its own and put
+     * in when it comes back, with the old lines standing until then.
+     *
+     * It used to be done right here in the frame, and a whole song is a StaticLayout per line,
+     * per background vocal and per translation, all with the balanced breaker - the frame the
+     * lyrics were meant to start fading in on, switched on or on a new song, was the one that
+     * stalled.
+     */
+    private boolean layOut() {
+        final int v = LockLyrics.version();
+        final int width = getWidth();
+        final List<LyricLine> ls = LockLyrics.lines();
+        if (ls.isEmpty()) {
+            wantVersion = wantWidth = -1;
+            apply(build(v, width, ls, paint, bgPaint, transPaint));
+            return true;
+        }
+        if (v == wantVersion && width == wantWidth) return false;
+        wantVersion = v;
+        wantWidth = width;
+        // Copies: the view's paints are recoloured on every frame. Each layout draws with the
+        // copy it was built with from here on - see drawStatic.
+        final TextPaint p = new TextPaint(paint);
+        final TextPaint bp = new TextPaint(bgPaint);
+        final TextPaint tp = new TextPaint(transPaint);
+        layoutHandler().post(new Runnable() {
+            @Override
+            public void run() {
+                final Built b = build(v, width, ls, p, bp, tp);
+                post(new Runnable() {
+                    @Override
+                    public void run() {
+                        // Overtaken by a newer request: that one's answer is the one to wait for.
+                        if (v != wantVersion || width != wantWidth) return;
+                        wantVersion = wantWidth = -1;
+                        // Stale by the time it landed, or asked for and then frozen by the lyrics
+                        // being switched off: the next step asks again when it is due.
+                        if (v != LockLyrics.version() || width != getWidth()
+                                || !LockLyrics.wantsAttached()) {
+                            return;
+                        }
+                        apply(b);
+                        invalidate();
+                        kick();
+                    }
+                });
+            }
+        });
+        return false;
+    }
+
+    /** One layout of the lines, made wherever build ran. */
+    private static final class Built {
+        int version, width, w;
+        List<LyricLine> lines;
+        StaticLayout[] main, trans, bgLay;
+        float[] base, height, dotsTop;
+        float[][] charX, charXBg;
+        long tookMs;
+    }
+
+    /** Touches nothing of the view's but its constants, so it can run off the UI thread. */
+    private Built build(int v, int width, List<LyricLine> ls, TextPaint p, TextPaint bp,
+                        TextPaint tp) {
+        long t0 = SystemClock.uptimeMillis();
+        Built b = new Built();
+        b.version = v;
+        b.width = width;
+        b.lines = ls;
+        int n = ls.size();
+        int w = Math.max(1, width - Math.round(2f * SIDE_DP * density));
+        b.w = w;
+        b.main = new StaticLayout[n];
+        b.trans = new StaticLayout[n];
+        b.bgLay = new StaticLayout[n];
+        b.base = new float[n];
+        b.height = new float[n];
+        b.dotsTop = new float[n];
+        b.charX = new float[n][];
+        b.charXBg = new float[n][];
+        float y = 0f;
+        float gap = GAP_DP * density;
+        for (int i = 0; i < n; i++) {
+            LyricLine l = ls.get(i);
+            // A long gap before this line holds the interlude dots, in a slot of their own.
+            long gapStart = i == 0 ? 0L : ls.get(i - 1).end;
+            if (l.start - gapStart >= LULL_MS) {
+                b.dotsTop[i] = y;
+                y += DOTS_SLOT_EM * textPx + gap;
+            } else {
+                b.dotsTop[i] = Float.NaN;
+            }
+            Layout.Alignment align = l.opposite
+                    ? Layout.Alignment.ALIGN_OPPOSITE : Layout.Alignment.ALIGN_NORMAL;
+            b.main[i] = StaticLayout.Builder.obtain(l.text, 0, l.text.length(), p, w)
+                    .setAlignment(align)
+                    .setIncludePad(false)
+                    .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
+                    .build();
+            float h = b.main[i].getHeight();
+            // The characters' places too, which the first draw of a word-timed line used to
+            // measure one getPrimaryHorizontal at a time on the UI thread.
+            if (l.hasWords()) b.charX[i] = charXOf(b.main[i], l);
+            if (l.bg != null) {
+                b.bgLay[i] = StaticLayout.Builder.obtain(l.bg.text, 0, l.bg.text.length(), bp, w)
+                        .setAlignment(align)
+                        .setIncludePad(false)
+                        .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
+                        .build();
+                h += BG_GAP_DP * density + b.bgLay[i].getHeight();
+                if (l.hasWords()) b.charXBg[i] = charXOf(b.bgLay[i], l.bg);
+            }
+            if (l.translation != null) {
+                b.trans[i] = StaticLayout.Builder.obtain(l.translation, 0, l.translation.length(),
+                                tp, w)
+                        .setAlignment(align)
+                        .setIncludePad(false)
+                        .build();
+                h += TRANS_GAP_DP * density + b.trans[i].getHeight();
+            }
+            b.base[i] = y;
+            b.height[i] = h;
+            y += h + gap;
+        }
+        b.tookMs = SystemClock.uptimeMillis() - t0;
+        return b;
+    }
+
+    /** Puts a finished layout in, and starts every line's animated state over. UI thread. */
+    private void apply(Built b) {
+        version = b.version;
+        lines = b.lines;
+        layoutWidth = b.width;
+        layoutMs = b.tookMs;
         buildGen++;
         blurPending.clear();
         int n = lines.size();
-        int w = Math.max(1, layoutWidth - Math.round(2f * SIDE_DP * density));
-        main = new StaticLayout[n];
-        trans = new StaticLayout[n];
-        bgLay = new StaticLayout[n];
-        charXBg = new float[n][];
-        base = new float[n];
-        height = new float[n];
-        charX = new float[n][];
+        main = b.main;
+        trans = b.trans;
+        bgLay = b.bgLay;
+        charXBg = b.charXBg;
+        base = b.base;
+        height = b.height;
+        charX = b.charX;
+        dotsTop = b.dotsTop;
         blurBmp = new Bitmap[n][BLUR_MAX_ROWS];
         scroll = new float[n];
         vel = new float[n];
@@ -755,53 +897,28 @@ final class LyricView extends View {
         scale = new float[n];
         java.util.Arrays.fill(scale, INACTIVE_SCALE);
         blur = new float[n];
-        dotsTop = new float[n];
-        float y = 0f;
-        float gap = GAP_DP * density;
-        for (int i = 0; i < n; i++) {
-            LyricLine l = lines.get(i);
-            // A long gap before this line holds the interlude dots, in a slot of their own.
-            long gapStart = i == 0 ? 0L : lines.get(i - 1).end;
-            if (l.start - gapStart >= LULL_MS) {
-                dotsTop[i] = y;
-                y += DOTS_SLOT_EM * textPx + gap;
-            } else {
-                dotsTop[i] = Float.NaN;
-            }
-            Layout.Alignment align = l.opposite
-                    ? Layout.Alignment.ALIGN_OPPOSITE : Layout.Alignment.ALIGN_NORMAL;
-            main[i] = StaticLayout.Builder.obtain(l.text, 0, l.text.length(), paint, w)
-                    .setAlignment(align)
-                    .setIncludePad(false)
-                    .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
-                    .build();
-            float h = main[i].getHeight();
-            if (l.bg != null) {
-                bgLay[i] = StaticLayout.Builder.obtain(l.bg.text, 0, l.bg.text.length(), bgPaint, w)
-                        .setAlignment(align)
-                        .setIncludePad(false)
-                        .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
-                        .build();
-                h += BG_GAP_DP * density + bgLay[i].getHeight();
-            }
-            if (l.translation != null) {
-                trans[i] = StaticLayout.Builder.obtain(l.translation, 0, l.translation.length(),
-                                transPaint, w)
-                        .setAlignment(align)
-                        .setIncludePad(false)
-                        .build();
-                h += TRANS_GAP_DP * density + trans[i].getHeight();
-            }
-            base[i] = y;
-            height[i] = h;
-            y += h + gap;
-        }
         focus = -1;
         dotsFor = -1;
         focusKey = Integer.MIN_VALUE;
         if (LockLyrics.verbose || n > 0) {
-            Xp.log(TAG + "view laid out " + n + " lines at width " + w);
+            Xp.log(TAG + "view laid out " + n + " lines at width " + b.w + " in " + b.tookMs
+                    + "ms");
         }
+    }
+
+    private static android.os.Handler sLayoutHandler;
+
+    /**
+     * Not the blur thread: that one runs at background priority behind a queue of pictures, and
+     * the lyrics wait on this one to appear at all.
+     */
+    private static synchronized android.os.Handler layoutHandler() {
+        if (sLayoutHandler == null) {
+            android.os.HandlerThread t = new android.os.HandlerThread("MCLyricLayout");
+            t.start();
+            sLayoutHandler = new android.os.Handler(t.getLooper());
+        }
+        return sLayoutHandler;
     }
 
     /** Where the band between the clock and the card is, in this view's coordinates. */
@@ -1218,17 +1335,18 @@ final class LyricView extends View {
 
     /** A line at one brightness, white by whiteness and the cover's tint otherwise. */
     private void drawStatic(Canvas c, int i, float a, float whiteness) {
+        // Each layout's own paint: it draws with the copy it was laid out with, not the view's.
         StaticLayout lay = main[i];
-        paint.setColor(ink(a, whiteness));
+        lay.getPaint().setColor(ink(a, whiteness));
         lay.draw(c);
-        paint.setColor(0xFFFFFFFF);
+        lay.getPaint().setColor(0xFFFFFFFF);
         StaticLayout b = bgLay[i];
         if (b != null) {
             int save = c.save();
             c.translate(0f, lay.getHeight() + BG_GAP_DP * density);
-            bgPaint.setColor(ink(a * BG_ALPHA, whiteness));
+            b.getPaint().setColor(ink(a * BG_ALPHA, whiteness));
             b.draw(c);
-            bgPaint.setColor(0xFFFFFFFF);
+            b.getPaint().setColor(0xFFFFFFFF);
             c.restoreToCount(save);
         }
         drawTranslation(c, i, a);
@@ -1259,9 +1377,9 @@ final class LyricView extends View {
         if (t == null) return;
         int save = c.save();
         c.translate(0f, transTop(i));
-        transPaint.setColor(ink(a * TRANS_ALPHA, 0f));
+        t.getPaint().setColor(ink(a * TRANS_ALPHA, 0f));
         t.draw(c);
-        transPaint.setColor(0xFFFFFFFF);
+        t.getPaint().setColor(0xFFFFFFFF);
         c.restoreToCount(save);
     }
 
@@ -1410,11 +1528,16 @@ final class LyricView extends View {
     private float[] charXFor(int i, StaticLayout lay, LyricLine l, float[][] cache) {
         float[] xs = cache[i];
         if (xs != null) return xs;
+        xs = charXOf(lay, l);
+        cache[i] = xs;
+        return xs;
+    }
+
+    private static float[] charXOf(StaticLayout lay, LyricLine l) {
         int len = l.text.length();
-        xs = new float[len + 1];
+        float[] xs = new float[len + 1];
         for (int k = 0; k < len; k++) xs[k] = lay.getPrimaryHorizontal(k);
         xs[len] = lay.getLineRight(lay.getLineCount() - 1);
-        cache[i] = xs;
         return xs;
     }
 
@@ -1486,7 +1609,7 @@ final class LyricView extends View {
         gapLog.setLength(0);
         loopFrames = gapsOver1 = gapsOver3 = maxGapMs = 0L;
         drawNsMax = drawNsSum = 0L;
-        return "lines=" + lines.size() + " wordLines=" + words + counts
+        return "lines=" + lines.size() + " wordLines=" + words + " layoutMs=" + layoutMs + counts
                 + " focus=" + focus + " ms=" + ms + " show=" + show
                 + " band=" + (bandOk ? Math.round(bandTop) + ".." + Math.round(bandBottom) : "none")
                 + " looping=" + looping + " parent=" + (getParent() instanceof ViewGroup);
