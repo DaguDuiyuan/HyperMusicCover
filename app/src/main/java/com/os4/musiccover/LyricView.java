@@ -143,6 +143,19 @@ final class LyricView extends View {
     private static final float DAMPING_MULT = 2.2f;
     /** A seek or an interlude: slower and softer. */
     private static final float K_SLOW = 90f, C_SLOW = 15f;
+    /** The spring a seek travels on: softer than a line change, since the distance is arbitrary. */
+    private static final float K_SEEK = 120f, C_SEEK = 24f;
+    /**
+     * The fastest the lyrics ever scroll, in band-heights per second.
+     *
+     * A spring's force grows with distance, so without a cap a seek across a whole song reaches
+     * its target within a frame or two - technically animated, indistinguishable from a cut. The
+     * cap is what turns that into a scroll you can follow, and it is in band-heights rather than
+     * pixels so it means the same thing on every screen. An ordinary line change never reaches
+     * it: one line's height carries a peak of a few hundred pixels a second against a cap in the
+     * thousands, so this costs the normal animation nothing.
+     */
+    private static final float SEEK_SPEED_BANDS = 8f;
     /** The ripple: 50ms more per line from the top of the view, shrinking past the focus. */
     private static final float RIPPLE_MS = 50f;
     private static final float RIPPLE_DECAY = 1f / 1.05f;
@@ -156,8 +169,6 @@ final class LyricView extends View {
     private static final float TAU_SHOW = 0.18f;
     /** Out faster than in: the clock starts growing into the lyrics' space at once. */
     private static final float TAU_HIDE = 0.06f;
-    /** A jump of more lines than this is a seek, and is cut rather than scrolled. */
-    private static final int SEEK_LINES = 8;
     /** A gap between lines at least this long gets the interlude dots. */
     private static final int LULL_MS = 4000;
 
@@ -442,14 +453,41 @@ final class LyricView extends View {
         }
         int key = dots >= 0 ? -(dots + 1) : sf;
         if (key != focusKey) {
-            boolean seek = focus < 0 || Math.abs(sf - focus) > SEEK_LINES || sf < focus - 2;
+            // Whether this was a seek is a question about the playhead, not about how many lines
+            // it crossed. Counting lines got it wrong in both directions and inconsistently
+            // inside one drag: eight lines is seconds of a fast song and minutes of a slow one,
+            // so dragging the progress bar animated a long scroll when the lines happened to be
+            // dense and cut straight to the target when they happened to be sparse.
+            // First lines of a song go straight to their place - there is nothing on screen for
+            // them to travel from. A seek travels: see the spring picked for it below.
+            boolean first = focus < 0;
+            boolean seek = !first && now - jumpedAt < SEEK_WINDOW_MS;
             focus = sf;
             dotsFor = dots;
             focusKey = key;
             focusChangedAt = now;
             float to = dots >= 0 ? dotsTop[dots] : base[sf];
-            if (seek) {
+            if (first) {
                 snap(to);
+            } else if (seek) {
+                // A drag scrolls there rather than cutting, however far it went - watching the
+                // lyrics travel is what makes a seek legible, and the direction it travels says
+                // which way the playhead moved.
+                //
+                // Two things separate this from an ordinary line change. There is no ripple: the
+                // per-line delay exists to make one line hand over to the next, and across
+                // twenty lines it reads as the list coming apart. And the spring is softer,
+                // because the distance here is the distance between two arbitrary points in the
+                // song rather than one line's height - what stops it from being a teleport is
+                // the speed cap in the integrator, and a softer spring hands over to that cap
+                // and back more gently.
+                springK = K_SEEK;
+                springC = C_SEEK;
+                dotsWasShowing = dots >= 0;
+                for (int i = 0; i < n; i++) {
+                    aimAt[i] = now;
+                    nextAim[i] = to;
+                }
             } else {
                 // The spring for this move: slow into and out of an interlude, otherwise stiffer
                 // the shorter the gap from the line before.
@@ -490,6 +528,10 @@ final class LyricView extends View {
         }
 
         float target = dotsFor >= 0 ? dotsTop[dotsFor] : base[focus];
+        // Band-relative so it means the same on any screen; the fallback is for the frames
+        // before the band has been measured.
+        float band = bandBottom - bandTop;
+        float speedCap = (band > 1f ? band : Math.max(1, getHeight())) * SEEK_SPEED_BANDS;
         int lo = Math.max(0, focus - 6), hi = Math.min(n - 1, focus + 12);
         for (int i = 0; i < n; i++) {
             if (i < lo || i > hi) {
@@ -513,6 +555,11 @@ final class LyricView extends View {
                 while (left > 0f) {
                     float h = Math.min(left, 1f / 240f);
                     vel[i] += (-springK * x - springC * vel[i]) * h;
+                    if (vel[i] > speedCap) {
+                        vel[i] = speedCap;
+                    } else if (vel[i] < -speedCap) {
+                        vel[i] = -speedCap;
+                    }
                     x += vel[i] * h;
                     left -= h;
                 }
@@ -662,16 +709,40 @@ final class LyricView extends View {
     private int smoothPosition(long now) {
         float raw = LockLyrics.positionMs() + (now - SystemClock.uptimeMillis());
         if (smoothAt == 0L || !LockLyrics.playing()) {
+            // Paused counts too: the progress bar can be dragged while paused, and that is still
+            // a seek even though nothing is advancing between frames to compare against.
+            if (smoothAt != 0L && Math.abs(raw - smoothMs) > JUMP_MS) {
+                jumpedAt = now;
+            }
             smoothMs = raw;
         } else {
             float pred = smoothMs + (now - smoothAt);
             float err = raw - pred;
-            smoothMs = Math.abs(err) > 250f ? raw
-                    : pred + err * Math.min(1f, (now - smoothAt) / 300f);
+            if (Math.abs(err) > JUMP_MS) {
+                jumpedAt = now;
+                smoothMs = raw;
+            } else {
+                smoothMs = pred + err * Math.min(1f, (now - smoothAt) / 300f);
+            }
         }
         smoothAt = now;
         return smoothMs < 0f ? 0 : Math.round(smoothMs);
     }
+
+    /** More than playback alone can explain between two reads: somebody moved the playhead. */
+    private static final float JUMP_MS = 250f;
+
+    /**
+     * How long after a jump a focus change still counts as part of it.
+     *
+     * Not just the one frame the jump was noticed on. A drag lands the position first and the
+     * focus catches up a frame or two later, and a seek whose scroll animates because the focus
+     * moved one frame too late is exactly the inconsistency this window closes.
+     */
+    private static final long SEEK_WINDOW_MS = 250L;
+
+    /** When the playhead last moved by more than playing could account for. */
+    private long jumpedAt = Long.MIN_VALUE;
 
     /** The interlude dots are up, or about to be. */
     private boolean dotsLive() {
