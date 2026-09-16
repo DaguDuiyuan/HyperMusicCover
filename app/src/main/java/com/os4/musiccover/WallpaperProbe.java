@@ -958,6 +958,8 @@ public class WallpaperProbe {
     }
 
     private static String sRenderState = "";
+    /** How the last GPU fade ended, for `op selftest`. */
+    private static volatile String sLastFade = "none yet";
     private static boolean sRenderStateFailed;
     /** The screen, as MIUI's own renderer has it (mSurfaceSize). 0 until an upload has run. */
     private static volatile int sSurfaceW, sSurfaceH;
@@ -1327,6 +1329,8 @@ public class WallpaperProbe {
                     // The GL thread stopped drawing - the screen went off, most likely. End it
                     // with a real reload: what is uploaded is the far end only for a fade that
                     // lands on its underneath picture, not for one waiting on its swap.
+                    sLastFade = "TIMED OUT after " + f.frames + " frames (armed=" + f.armed
+                            + ", swap=" + f.swapRequested + "/" + f.swapUploaded + ")";
                     Xp.log(TAG + "gpu fade timed out after " + f.frames + " frames (armed="
                             + f.armed + ", swap=" + f.swapRequested + "/" + f.swapUploaded + ")");
                     finishGpuFade(f);
@@ -1469,6 +1473,8 @@ public class WallpaperProbe {
             new Handler(Looper.getMainLooper()).post(new Runnable() {
                 @Override
                 public void run() {
+                    sLastFade = "done in " + (SystemClock.uptimeMillis() - f.startedAt) + "ms, "
+                            + f.frames + " frames, armed=" + f.armed;
                     Xp.log(TAG + "gpu fade done in " + (SystemClock.uptimeMillis() - f.startedAt)
                             + "ms from the request, alpha " + Math.round(f.a0 * 100f) / 100f
                             + " -> " + f.a1 + ", " + f.frames + " frames over " + f.durMs
@@ -2183,6 +2189,9 @@ public class WallpaperProbe {
         sb.append("\ntexture: ").append(sKeyguardTexture == null ? "not captured" : "captured");
         sb.append("\ngpu fade: on=").append(sGpuFadeOn).append(" hooked=").append(sDrawHooked)
                 .append(" broken=").append(sGpuFadeBroken);
+        // How the last transition actually ended. "TIMED OUT ... armed=false" is the shape of a
+        // frame request that the OEM accepted and did nothing with.
+        sb.append("\nlast fade: ").append(sLastFade);
         return sb.toString();
     }
 
@@ -2267,7 +2276,18 @@ public class WallpaperProbe {
     private static boolean callFrameRequest(Object eng, Object[] req, boolean keepAlive) {
         Object[] args = new Object[req.length - 1];
         System.arraycopy(req, 1, args, 0, args.length);
-        if (args.length > 0 && args[0] instanceof Boolean) args[0] = keepAlive;
+        // The argument is the OEM's, not ours. It used to be overwritten with keepAlive - a flag
+        // that means "this is a fade's own frame, do not log it" on this side and nothing at all
+        // on theirs - which sent `true` where FRAME_REQUESTS deliberately says FALSE, the
+        // no-animation value at every one of these entry points.
+        //
+        // On 7.0.7 that went unnoticed: the frame request there is U(Z), which reaches preRender
+        // either way. On 8.0.8-flip the frame request is Z(Z), which posts preRender - V(Z),
+        // named by its own "#preRender" trace section - and THAT one branches on the argument.
+        // With true it never re-read the texture, so a GPU fade armed on nothing: measured as
+        // `gpu fade timed out after 226 frames (armed=false)`, about 1.9s of the cover sitting
+        // in the wallpaper process without being drawn, which is what read on the phone as the
+        // cover taking seconds to appear and needing a fold or a rotation to show up.
         try {
             Xp.callMethod(eng, (String) req[0], args);
             return true;
