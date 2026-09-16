@@ -168,13 +168,23 @@ final class LyricView extends View {
     private static final float DOTS_SLOT_EM = 1.8f;
     private static final float DOT_DIM = 0.18f;
     private static final float DOT_RAMP = 0.7f;
-    private static final float DOT_BREATH = 0.135f;
-    private static final long DOT_BREATH_MS = 4200L;
-    private static final long DOT_BREATH_PHASE_MS = 1470L;
+    /**
+     * The breath: the whole group swells and shrinks about its centre by this much either way.
+     * It was +-13.5% of each dot's radius on a 4.2s cosine - too slow and too small to read as
+     * breathing (user, 2026-09-16).
+     */
+    private static final float DOT_BREATH = 0.2f;
+    /** About this long a breath, stretched so a whole number of them fits the interlude. */
+    private static final long DOT_BREATH_MS = 2400L;
+    /** The share of a breath spent swelling; the shrink is slower, like breathing out. */
+    private static final float DOT_INHALE = 0.42f;
+    /** How long the breath takes to reach its full depth once the interlude starts. */
+    private static final long DOT_BREATH_IN_MS = 700L;
     private static final long DOT_APPEAR_MS = 1200L;
-    private static final long DOT_POP_MS = 90L;
-    private static final long DOT_EXIT_MS = 180L;
+    /** Out: a small swell, then shrinking to nothing, ending this long before the scroll. */
+    private static final long DOT_EXIT_MS = 480L;
     private static final long DOT_EXIT_LEAD_MS = 120L;
+    private static final float DOT_EXIT_BACK = 1.7f;
 
     private final TextPaint paint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint transPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
@@ -211,14 +221,19 @@ final class LyricView extends View {
      * RenderNode with a blur effect: that was the first version, and on this phone the node
      * drew nothing at all - every line vanished the moment it settled (recording 02:52).
      */
+    /**
+     * Indexed by line and distance - 1, kept for as long as the line is near the focus. It used
+     * to be three slots a line with the farthest evicted, and a line's distance walks 4, 3, 2, 1,
+     * 0, 2, 3 - so every line change threw pictures away that the next one asked for again: a
+     * dozen blurs, bitmaps and texture uploads landing in the middle of every scroll.
+     */
     private Bitmap[][] blurBmp = new Bitmap[0][];
-    /** The distance each picture was blurred for; 0 for an empty slot. */
-    private int[][] blurRows = new int[0][];
     /** Pictures asked of the blur thread and not back yet, as line * 8 + distance. */
     private final java.util.HashSet<Integer> blurPending = new java.util.HashSet<>();
     /** Bumped by every rebuild, so a picture made for the previous layout is thrown away. */
     private int buildGen;
-    private static final int BLUR_SLOTS = 3;
+    /** From this distance on the blur is wide enough to be made at a quarter of the resolution. */
+    private static final int BLUR_QUARTER_ROWS = 3;
     private final android.graphics.RectF bmpDst = new android.graphics.RectF();
     private final Paint bmpPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
@@ -257,11 +272,14 @@ final class LyricView extends View {
     private final Runnable frame = new Runnable() {
         @Override
         public void run() {
+            noteFrameGap(now());
             looping = false;
             if (step()) invalidate();
             if (needsFrames()) {
                 looping = true;
                 postOnAnimation(this);
+            } else {
+                lastLoopFrame = 0L;
             }
         }
     };
@@ -296,6 +314,10 @@ final class LyricView extends View {
         bgPaint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, BG_SP,
                 getResources().getDisplayMetrics()));
         bgPaint.setTypeface(Typeface.create(Typeface.DEFAULT, BG_WEIGHT, false));
+        // No frame rate is asked for here. The keyguard window renders at 60Hz on this 120Hz
+        // panel unless the screen is touched, and neither setRequestedFrameRate on this view nor
+        // a 120Hz vote on the window's own layer moved HyperOS off that (SurfaceFlinger dumps,
+        // 2026-09-16). The user's call: the touch boost is enough, do not hold the panel up.
         // Touches go through to the lock screen: the double tap and the swipes are the OEM's.
         setClickable(false);
         setFocusable(false);
@@ -323,6 +345,7 @@ final class LyricView extends View {
         getViewTreeObserver().removeOnPreDrawListener(preDraw);
         removeCallbacks(frame);
         looping = false;
+        lastLoopFrame = 0L;
         super.onDetachedFromWindow();
     }
 
@@ -334,9 +357,12 @@ final class LyricView extends View {
      * time to integrate.
      */
     private boolean step() {
-        long now = SystemClock.uptimeMillis();
+        // The frame's own vsync time, not the clock at the moment this runs: how late the main
+        // thread gets to a frame varies by a few ms with whatever else the keyguard is doing, and
+        // stepping on the wall clock put that jitter straight into the scroll and the word fill.
+        long now = now();
+        if (now == lastStep) return false;
         float dt = lastStep == 0L ? 0f : Math.min(0.05f, (now - lastStep) / 1000f);
-        if (lastStep != 0L && now - lastStep < 2L) return false;
         lastStep = now;
 
         boolean changed = false;
@@ -379,7 +405,7 @@ final class LyricView extends View {
         // invalidated again - the whole keyguard window redrawn at the refresh rate for as long
         // as music played. SystemUI's main thread went to GC for 27s in two minutes and was
         // killed for an ANR (2026-09-16 02:51). Only what moves redraws.
-        ms = LockLyrics.positionMs();
+        ms = smoothPosition(now);
         int n = lines.size();
         int idx = indexAt(ms);
 
@@ -409,6 +435,7 @@ final class LyricView extends View {
             focus = sf;
             dotsFor = dots;
             focusKey = key;
+            focusChangedAt = now;
             float to = dots >= 0 ? dotsTop[dots] : base[sf];
             if (seek) {
                 snap(to);
@@ -607,13 +634,39 @@ final class LyricView extends View {
         return wordsLive() || dotsLive();
     }
 
+    /** Inside a frame, that frame's vsync time; outside one, the uptime clock it is based on. */
     private static long now() {
-        return SystemClock.uptimeMillis();
+        return android.view.animation.AnimationUtils.currentAnimationTimeMillis();
+    }
+
+    private float smoothMs;
+    private long smoothAt;
+
+    /**
+     * The session's position at this frame's time, eased rather than jumped when a fresh read of
+     * the session disagrees with the extrapolation by a little. The tick re-reads it every second
+     * and players round and batch what they report, so the raw number steps by tens of ms now
+     * and then - a visible hitch in the word fill. A real jump (a seek) is still taken at once.
+     */
+    private int smoothPosition(long now) {
+        float raw = LockLyrics.positionMs() + (now - SystemClock.uptimeMillis());
+        if (smoothAt == 0L || !LockLyrics.playing()) {
+            smoothMs = raw;
+        } else {
+            float pred = smoothMs + (now - smoothAt);
+            float err = raw - pred;
+            smoothMs = Math.abs(err) > 250f ? raw
+                    : pred + err * Math.min(1f, (now - smoothAt) / 300f);
+        }
+        smoothAt = now;
+        return smoothMs < 0f ? 0 : Math.round(smoothMs);
     }
 
     /** The interlude dots are up, or about to be. */
     private boolean dotsLive() {
-        return dotsFor >= 0 && show > 0f;
+        // Not while paused: nothing about them moves then, and this kept the whole keyguard
+        // window redrawing at the refresh rate for as long as the pause lasted.
+        return dotsFor >= 0 && show > 0f && LockLyrics.playing();
     }
 
     /** A held note is glowing now, or is about to - the window's HDR mode follows this. */
@@ -691,8 +744,7 @@ final class LyricView extends View {
         base = new float[n];
         height = new float[n];
         charX = new float[n][];
-        blurBmp = new Bitmap[n][BLUR_SLOTS];
-        blurRows = new int[n][BLUR_SLOTS];
+        blurBmp = new Bitmap[n][BLUR_MAX_ROWS];
         scroll = new float[n];
         vel = new float[n];
         aim = new float[n];
@@ -783,6 +835,14 @@ final class LyricView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
+        long t0 = System.nanoTime();
+        drawLyrics(canvas);
+        long took = System.nanoTime() - t0;
+        drawNsSum += took;
+        if (took > drawNsMax) drawNsMax = took;
+    }
+
+    private void drawLyrics(Canvas canvas) {
         drawCount++;
         if (show <= 0.003f || lines.isEmpty() || focus < 0 || main.length != lines.size()) return;
         float bandH = bandBottom - bandTop;
@@ -796,6 +856,18 @@ final class LyricView extends View {
         int save = canvas.save();
         canvas.clipRect(0f, bandTop, getWidth(), bandBottom);
         for (int i = Math.max(0, focus - 6); i < n; i++) {
+            // The interlude slot above this line, if it has one: its dots move with the line, and
+            // sit there dim from the start rather than leaving a hole until their turn.
+            if (!Float.isNaN(dotsTop[i])) {
+                float dy = anchor + dotsTop[i] - scroll[i];
+                if (dy > bandBottom) break;
+                float dh = DOTS_SLOT_EM * textPx;
+                float dEdge = Math.min(clamp01((dy - bandTop) / fade),
+                        clamp01((bandBottom - (dy + dh)) / fade));
+                float da = show * dEdge;
+                if (dotsFor >= 0 ? i < dotsFor : i <= focus) da *= ABOVE_ALPHA;
+                if (da > 0.003f) drawDots(canvas, i, side, dy, da);
+            }
             float y = anchor + base[i] - scroll[i];
             if (y > bandBottom) break;
             if (y + height[i] < bandTop) continue;
@@ -809,41 +881,64 @@ final class LyricView extends View {
             if (a <= 0.003f) continue;
             drawLine(canvas, i, side, y, a);
         }
-        if (dotsFor >= 0) {
-            drawDots(canvas, dotsFor, side, anchor + dotsTop[dotsFor] - scroll[dotsFor]);
-        }
         canvas.restoreToCount(save);
     }
 
     /**
-     * The interlude: three dots where the next line will be, lighting one after another across
-     * the gap and breathing while they do, then dropping away just before the stack moves on.
-     * Every number is off the frames of Apple's: a dot a quarter of the text size across, 0.43
-     * of it apart; dim at 18%, each lit linearly over about 70% of its third; a 4.2s breath of
-     * +-13.5%; a 90ms pop in; a 180ms shrink and fade out that ends 120ms before the scroll.
+     * The interlude slot before line d: three dots.
+     *
+     * Before their turn they sit there dim and still, like any line to come. Once the gap starts
+     * they light one after another across it (dim at 18%, each lit over about 70% of its third,
+     * sizes and spacing off Apple's frames) while the group breathes about its centre - swelling
+     * quicker than it shrinks, a whole number of breaths fitted to the gap so the last one ends
+     * at rest. Just before the stack moves on they swell a touch and shrink away to nothing.
+     * Once their interlude is over they are not drawn again.
      */
-    private void drawDots(Canvas c, int d, float x, float top) {
+    private void drawDots(Canvas c, int d, float x, float top, float alphaMul) {
         long gapStart = d == 0 ? 0L : lines.get(d - 1).end;
         long sw = switchAt(d);
         long appear = gapStart + Math.min(DOT_APPEAR_MS, (long) ((sw - gapStart) * 0.15f));
         long exitEnd = sw - DOT_EXIT_LEAD_MS;
-        long exitStart = exitEnd - DOT_EXIT_MS;
-        if (ms < appear || ms >= exitEnd || exitStart <= appear) return;
-        float pop = clamp01((ms - appear) / (float) DOT_POP_MS);
-        pop = 1f - (1f - pop) * (1f - pop);
-        float exit = clamp01((ms - exitStart) / (float) DOT_EXIT_MS);
-        float u = 3f * (ms - appear) / (float) (exitStart - appear);
-        float breath = 1f + DOT_BREATH * (float) Math.cos(
-                2.0 * Math.PI * (ms - appear - DOT_BREATH_PHASE_MS) / DOT_BREATH_MS);
+        long exitStart = Math.max(appear, exitEnd - DOT_EXIT_MS);
+        if (ms >= exitEnd) return;
+
+        float group = 1f, fade = 1f, u = 0f;
+        if (ms >= appear) {
+            long span = exitStart - appear;
+            long t = Math.min(ms, exitStart) - appear;
+            u = span <= 0 ? 3f : 3f * t / (float) span;
+            if (span > 0) {
+                float period = span / (float) Math.max(1, Math.round(span / (float) DOT_BREATH_MS));
+                // Started a quarter of the way into the swell, where the curve is at rest level
+                // and rising, so the first frame of the interlude matches the still dots.
+                float p = (t + period * DOT_INHALE / 2f) / period;
+                p -= (float) Math.floor(p);
+                float b = p < DOT_INHALE
+                        ? -(float) Math.cos(Math.PI * p / DOT_INHALE)
+                        : (float) Math.cos(Math.PI * (p - DOT_INHALE) / (1f - DOT_INHALE));
+                float depth = clamp01(t / (float) DOT_BREATH_IN_MS);
+                depth = 1f - (1f - depth) * (1f - depth);
+                group = 1f + DOT_BREATH * depth * b;
+            }
+            if (ms >= exitStart) {
+                float e = clamp01((ms - exitStart) / (float) (exitEnd - exitStart));
+                float back = e * e * ((DOT_EXIT_BACK + 1f) * e - DOT_EXIT_BACK);
+                group *= Math.max(0f, 1f - back);
+                fade = 1f - clamp01((e - 0.55f) / 0.45f);
+            }
+        }
+        if (group <= 0.01f) return;
         float size = DOT_EM * textPx;
+        float gap = DOT_GAP_EM * textPx * group;
+        float cx = x + size / 2f + DOT_GAP_EM * textPx;
         float cy = top + DOT_CENTER_EM * textPx;
+        float r = size / 2f * group;
         for (int k = 0; k < 3; k++) {
             float litK = clamp01((u - k) / DOT_RAMP);
-            float r = size / 2f * breath * (0.3f + 0.7f * pop) * (1f - 0.3f * exit);
-            float alpha = show * pop * (1f - exit) * (DOT_DIM + (1f - DOT_DIM) * litK);
+            float alpha = alphaMul * fade * (DOT_DIM + (1f - DOT_DIM) * litK);
             if (alpha <= 0.003f) continue;
             dotPaint.setColor(ink(alpha, litK));
-            c.drawCircle(x + size / 2f + k * DOT_GAP_EM * textPx, cy, r, dotPaint);
+            c.drawCircle(cx + (k - 1) * gap, cy, r, dotPaint);
         }
     }
 
@@ -968,38 +1063,37 @@ final class LyricView extends View {
      * was the hitch the scroll showed (99th percentile 38ms, 2026-09-16).
      */
     private Bitmap blurredFor(int i, int rows) {
-        Bitmap best = null;
-        int bestGap = Integer.MAX_VALUE;
-        for (int k = 0; k < BLUR_SLOTS; k++) {
-            Bitmap b = blurBmp[i][k];
-            if (b == null) continue;
-            int gap = Math.abs(blurRows[i][k] - rows);
-            if (gap == 0) return b;
-            if (gap < bestGap) {
-                bestGap = gap;
-                best = b;
+        Bitmap[] have = blurBmp[i];
+        if (have[rows - 1] != null) return have[rows - 1];
+        requestBlur(i, rows);
+        for (int gap = 1; gap < BLUR_MAX_ROWS; gap++) {
+            if (rows - gap >= 1 && have[rows - gap - 1] != null) return have[rows - gap - 1];
+            if (rows + gap <= BLUR_MAX_ROWS && have[rows + gap - 1] != null) {
+                return have[rows + gap - 1];
             }
         }
-        requestBlur(i, rows);
-        return best;
+        return null;
     }
 
-    /** The pictures the lines around the focus will want next: their distance now, and one less. */
+    /**
+     * The pictures the lines around the focus want now and at the next line change: their
+     * distance now and one less, and for the line being sung the distance it drops back to.
+     * Once made they stay, so after the first few lines this asks for one new line a change.
+     */
     private void prewarmBlur() {
         int n = lines.size();
         for (int i = Math.max(0, focus - 4); i <= Math.min(n - 1, focus + 10); i++) {
-            int d = rowsFromFocus(i);
-            if (d >= 1) requestBlur(i, Math.min(d, BLUR_MAX_ROWS));
-            if (d >= 2) requestBlur(i, Math.min(d - 1, BLUR_MAX_ROWS));
-            requestBlur(i, Math.min(d + 1, BLUR_MAX_ROWS));
+            int d = Math.min(rowsFromFocus(i), BLUR_MAX_ROWS);
+            if (d >= 1) requestBlur(i, d);
+            if (d >= 2) requestBlur(i, d - 1);
+            if (d <= 1) requestBlur(i, 2);
+            if (i < focus && d < BLUR_MAX_ROWS) requestBlur(i, d + 1);
         }
     }
 
     private void requestBlur(final int i, final int rows) {
-        if (rows < 1 || i < 0 || i >= blurBmp.length) return;
-        for (int k = 0; k < BLUR_SLOTS; k++) {
-            if (blurBmp[i][k] != null && blurRows[i][k] == rows) return;
-        }
+        if (rows < 1 || rows > BLUR_MAX_ROWS || i < 0 || i >= blurBmp.length) return;
+        if (blurBmp[i][rows - 1] != null) return;
         if (!blurPending.add(i * 8 + rows)) return;
         // Everything the other thread needs, taken here: the paints are this view's and change on
         // every frame, so it gets copies, and it lays the text out again for itself.
@@ -1014,33 +1108,38 @@ final class LyricView extends View {
         final int pad = blurPad;
         final float transGap = TRANS_GAP_DP * density;
         final float bgGap = BG_GAP_DP * density;
+        final int down = rows >= BLUR_QUARTER_ROWS ? 4 : 2;
         blurHandler().post(new Runnable() {
             @Override
             public void run() {
                 final Bitmap b = makeBlurred(l, width, fullW, fullH, pad, radius, p, tp, bp,
-                        transGap, bgGap);
+                        transGap, bgGap, down);
                 post(new Runnable() {
                     @Override
                     public void run() {
                         blurPending.remove(i * 8 + rows);
                         if (b == null || gen != buildGen || i >= blurBmp.length) return;
-                        storeBlurred(i, rows, b);
-                        invalidate();
+                        blurBmp[i][rows - 1] = b;
+                        // While the loop runs its next frame draws it anyway.
+                        if (!looping) invalidate();
                     }
                 });
             }
         });
     }
 
-    /** Off the UI thread: the line at half resolution, blurred. The blur scales with the canvas. */
+    /**
+     * Off the UI thread: the line at 1/down of the resolution, blurred. The blur scales with the
+     * canvas.
+     */
     private static Bitmap makeBlurred(LyricLine l, int width, int fullW, int fullH, int pad,
                                       float radius, TextPaint p, TextPaint tp, TextPaint bp,
-                                      float transGap, float bgGap) {
+                                      float transGap, float bgGap, int down) {
         try {
-            Bitmap b = Bitmap.createBitmap(Math.max(1, fullW / 2), Math.max(1, fullH / 2),
+            Bitmap b = Bitmap.createBitmap(Math.max(1, fullW / down), Math.max(1, fullH / down),
                     Bitmap.Config.ARGB_8888);
             Canvas c = new Canvas(b);
-            c.scale(0.5f, 0.5f);
+            c.scale(1f / down, 1f / down);
             c.translate(pad, pad);
             BlurMaskFilter mf = new BlurMaskFilter(radius, BlurMaskFilter.Blur.NORMAL);
             Layout.Alignment align = l.opposite
@@ -1090,33 +1189,14 @@ final class LyricView extends View {
         }
     }
 
-    /** Keeps the picture, evicting the one this line is least likely to need: the farthest distance. */
-    private void storeBlurred(int i, int rows, Bitmap b) {
-        int d = Math.max(1, Math.min(BLUR_MAX_ROWS, rowsFromFocus(i)));
-        int slot = -1, worst = -1;
-        for (int k = 0; k < BLUR_SLOTS; k++) {
-            if (blurBmp[i][k] == null) {
-                slot = k;
-                break;
-            }
-            int gap = Math.abs(blurRows[i][k] - d);
-            if (gap > worst) {
-                worst = gap;
-                slot = k;
-            }
-        }
-        // Not recycled: the render thread may still be drawing it from the last frame. The
-        // collector frees it once nothing holds it.
-        blurBmp[i][slot] = b;
-        blurRows[i][slot] = rows;
-    }
-
+    /**
+     * A line far from the focus lets its pictures go. Not recycled: the render thread may still be
+     * drawing one from the last frame. The collector frees them once nothing holds them.
+     */
     private void dropBlurred(int i) {
         if (i >= blurBmp.length) return;
-        for (int k = 0; k < BLUR_SLOTS; k++) {
-            blurBmp[i][k] = null;
-            blurRows[i][k] = 0;
-        }
+        Bitmap[] have = blurBmp[i];
+        for (int k = 0; k < have.length; k++) have[k] = null;
     }
 
     private static android.os.Handler sBlurHandler;
@@ -1346,6 +1426,40 @@ final class LyricView extends View {
     private final int[] whyCount = new int[9];
     private int stepCount, drawCount;
 
+    /**
+     * Diagnostics: how evenly the animation's frames came while it ran. A gap is a vsync the
+     * loop asked for and did not get - counted only between two frames of a running loop.
+     */
+    private long loopFrames, gapsOver1, gapsOver3, maxGapMs;
+    private long drawNsMax, drawNsSum;
+    private long lastLoopFrame;
+    private long focusChangedAt;
+    private final StringBuilder gapLog = new StringBuilder();
+    private long vsyncMs;
+
+    private void noteFrameGap(long now) {
+        if (vsyncMs == 0L) {
+            android.view.Display disp = getDisplay();
+            float hz = disp == null ? 60f : disp.getRefreshRate();
+            vsyncMs = Math.max(4L, Math.round(1000f / hz));
+        }
+        if (lastLoopFrame != 0L) {
+            long gap = now - lastLoopFrame;
+            loopFrames++;
+            if (gap > vsyncMs * 3 / 2) gapsOver1++;
+            if (gap > vsyncMs * 3) {
+                gapsOver3++;
+                // Each stall with how long after the last line change it came, to tell a stall
+                // caused by a line change from one that is not.
+                if (gapLog.length() < 600) {
+                    gapLog.append(gap).append('@').append(now - focusChangedAt).append(' ');
+                }
+            }
+            if (gap > maxGapMs) maxGapMs = gap;
+        }
+        lastLoopFrame = now;
+    }
+
     private void noteWhy(int why) {
         stepCount++;
         for (int b = 0; b < whyCount.length; b++) {
@@ -1362,8 +1476,16 @@ final class LyricView extends View {
             if (whyCount[b] > 0) w.append(names[b]).append('=').append(whyCount[b]).append(',');
             whyCount[b] = 0;
         }
-        String counts = " steps=" + stepCount + " draws=" + drawCount + " why=" + w;
+        String counts = " steps=" + stepCount + " draws=" + drawCount + " why=" + w
+                + " loopFrames=" + loopFrames + " late=" + gapsOver1 + " veryLate=" + gapsOver3
+                + " maxGap=" + maxGapMs + "ms vsync=" + vsyncMs + "ms drawMax="
+                + (drawNsMax / 100000L) / 10f + "ms drawAvg="
+                + (drawCount == 0 ? 0f : (drawNsSum / drawCount / 100000L) / 10f) + "ms";
         stepCount = drawCount = 0;
+        counts += " stalls(gap@sinceLineChange)=[" + gapLog.toString().trim() + "]";
+        gapLog.setLength(0);
+        loopFrames = gapsOver1 = gapsOver3 = maxGapMs = 0L;
+        drawNsMax = drawNsSum = 0L;
         return "lines=" + lines.size() + " wordLines=" + words + counts
                 + " focus=" + focus + " ms=" + ms + " show=" + show
                 + " band=" + (bandOk ? Math.round(bandTop) + ".." + Math.round(bandBottom) : "none")

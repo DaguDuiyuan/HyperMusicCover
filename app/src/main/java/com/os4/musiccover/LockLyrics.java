@@ -102,13 +102,16 @@ final class LockLyrics {
     /**
      * Whether it should be visible: attached, lit, and the clock settled small.
      *
-     * Not during ENTER. The clock is still full size for most of the entry, and a recording
-     * (2026-09-16 02:23) showed the lyrics arriving on top of it - on a toggle and on a wake
-     * alike. They fade in once the clock has landed instead.
+     * Through ENTER as well, wake or toggle alike: they come up with the clock rather than after
+     * it (user, 2026-09-16 - waiting for the landing made them turn up late). An early version
+     * held them back because a recording (02:23) had them arriving on top of the full-size clock;
+     * that was the band being stale, and it is measured from the clock's live ink every frame
+     * now, so through the flight they follow it down instead.
      */
     static boolean wantsShown() {
         if (!wantsAttached() || !Main.screenOnCached()) return false;
-        return ClockCollapse.phase() == ClockCollapse.Phase.ON;
+        ClockCollapse.Phase p = ClockCollapse.phase();
+        return p == ClockCollapse.Phase.ON || p == ClockCollapse.Phase.ENTER;
     }
 
     /** The media card, looked up again only when the one we hold has left the window. */
