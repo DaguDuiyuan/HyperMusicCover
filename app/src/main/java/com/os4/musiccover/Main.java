@@ -1587,6 +1587,43 @@ public class Main extends XposedModule {
                         String d = LyricSource.dumpMetadata(sWatched);
                         Xp.log(TAG + "metadump: " + d);
                         setResultData(d);
+                    } else if ("ncm".equals(op)) {
+                        // What the by-name route makes of the playing session: the four fields
+                        // it matches on, the terms it would search, every candidate with how far
+                        // its duration sits from ours, and which one that proves. On a worker
+                        // because it is two network round trips, so the answer cannot be this
+                        // broadcast's result - it goes to a file, which is also the only form
+                        // of it this phone can read back (the module's INFO log does not
+                        // survive to logcat here).
+                        final MediaController w = sWatched;
+                        // The four fields can also be given by hand, which is how a report of
+                        // "this song never got lyrics" gets reproduced here without the song:
+                        //   --es title .. --es artist .. --es album .. --el dur 252236
+                        final boolean byHand = i.hasExtra("title") || i.hasExtra("artist")
+                                || i.hasExtra("album") || i.hasExtra("dur");
+                        final String qTitle = i.getStringExtra("title");
+                        final String qArtist = i.getStringExtra("artist");
+                        final String qAlbum = i.getStringExtra("album");
+                        final long qDur = i.getLongExtra("dur", 0L);
+                        final java.io.File out = new java.io.File(c.getFilesDir(), "mc_ncm.txt");
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                String d = byHand
+                                        ? NcmLyrics.describe(qTitle, qArtist, qAlbum, qDur)
+                                        : NcmLyrics.describe(w);
+                                Xp.log(TAG + "ncm: " + d);
+                                try {
+                                    java.io.FileOutputStream os = new java.io.FileOutputStream(out);
+                                    os.write(d.getBytes("UTF-8"));
+                                    os.close();
+                                    out.setReadable(true, false);
+                                } catch (Throwable t) {
+                                    Xp.log(TAG + "ncm write failed: " + t);
+                                }
+                            }
+                        }, "MCNcmProbe").start();
+                        setResultData("searching -> " + out.getAbsolutePath());
                     } else if ("hidefp".equals(op)) {
                         sHideFp = i.getBooleanExtra("on", !sHideFp);
                         saveState();
@@ -7576,10 +7613,13 @@ public class Main extends XposedModule {
             return;
         }
         boolean on = !LockLyrics.sEnabled;
+        long t0 = android.os.SystemClock.uptimeMillis();
         LockLyrics.setEnabled(on, sTrackKey, sWatched);
         saveState();
         sTwoFired++;
-        sTwoWhy = "lyrics " + (on ? "on" : "off");
+        // How long the switch held the touch up for: the stutter on switching was reported here.
+        sTwoWhy = "lyrics " + (on ? "on" : "off") + " in "
+                + (android.os.SystemClock.uptimeMillis() - t0) + "ms";
         Xp.log(TAG + "two-finger tap: lyrics " + (on ? "on" : "off"));
     }
 

@@ -66,6 +66,14 @@ final class LockLyrics {
 
     /** A lookup is in the air; the blur is held rather than dropped while it is. */
     private static boolean sLoading;
+    /**
+     * Which route the lines on screen came from, as a LyricSource.SRC_ constant.
+     *
+     * Kept so the session can win later: anything short of the session's own lyric is provisional
+     * and is replaced if one turns up, because a provider module writes it seconds after the
+     * track starts and the key cannot see the difference.
+     */
+    private static int sSource = LyricSource.SRC_NONE;
     /** What the wallpaper process was last told about the blur. Null = unknown. */
     private static Boolean sBlurSent;
 
@@ -75,11 +83,22 @@ final class LockLyrics {
     private static View sCard;
     private static long sCardLookAt;
 
+    /** Lines plus the route they came by - a cache hit has to answer both. */
+    private static final class Cached {
+        final List<LyricLine> lines;
+        final int source;
+
+        Cached(List<LyricLine> lines, int source) {
+            this.lines = lines;
+            this.source = source;
+        }
+    }
+
     /** Songs recently shown, so skipping back and forth does not go to the network each time. */
-    private static final Map<String, List<LyricLine>> CACHE =
-            new LinkedHashMap<String, List<LyricLine>>(16, 0.75f, true) {
+    private static final Map<String, Cached> CACHE =
+            new LinkedHashMap<String, Cached>(16, 0.75f, true) {
                 @Override
-                protected boolean removeEldestEntry(Map.Entry<String, List<LyricLine>> e) {
+                protected boolean removeEldestEntry(Map.Entry<String, Cached> e) {
                     return size() > 12;
                 }
             };
@@ -158,16 +177,36 @@ final class LockLyrics {
             if (verbose) Xp.log(TAG + "demo is held, not looking " + key + " up");
             return;
         }
-        if (key.equals(sKey)) return;
+        if (key.equals(sKey)) {
+            // Same song - but not necessarily the same evidence. A provider module (LyricInfo
+            // and the ColorOS ones write the whole lyric to the session; the player itself may
+            // too) cannot publish a lyric until it knows what is playing, so it writes one into
+            // a session that already exists. None of the fields this key is built from change
+            // when it does, which is the point of the key - so without this, the lyric a module
+            // just went and fetched would sit on the session unread for the whole song, and
+            // whatever we settled for in the first second would stand.
+            if (sEnabled && !key.isEmpty() && sSource != LyricSource.SRC_LYRIC_INFO
+                    && !sLoading && LyricSource.hasLyricInfo(c)) {
+                Xp.log(TAG + "the session now carries its own lyric; re-reading " + key);
+                CACHE.remove(key);
+                sKey = "";
+            } else {
+                return;
+            }
+        }
         sKey = key;
+        // The previous song's route says nothing about this one, and leaving it set would let a
+        // track that follows a session-lyric track skip the upgrade check entirely.
+        sSource = LyricSource.SRC_NONE;
         // Set before the lines are emptied, so the blur is held across the lookup instead of
         // being dropped by the empty set and put back when the answer lands.
         sLoading = sEnabled && !key.isEmpty() && !CACHE.containsKey(key);
         setLines(Collections.<LyricLine>emptyList(), "track changed");
         if (!sEnabled || key.isEmpty()) return;
-        List<LyricLine> hit = CACHE.get(key);
+        Cached hit = CACHE.get(key);
         if (hit != null) {
-            setLines(hit, "cached");
+            sSource = hit.source;
+            setLines(hit.lines, "cached");
             return;
         }
         final String want = key;
@@ -175,13 +214,14 @@ final class LockLyrics {
         sLoading = true;
         LyricSource.load(c, new LyricSource.Callback() {
             @Override
-            public void onLines(List<LyricLine> lines, String why) {
+            public void onLines(List<LyricLine> lines, String why, int source) {
                 if (gen != sGen || !want.equals(sKey) || sDemo) {
                     Xp.log(TAG + "lyrics for " + want + " arrived after the track changed");
                     return;
                 }
                 sLoading = false;
-                if (!lines.isEmpty()) CACHE.put(want, lines);
+                sSource = source;
+                if (!lines.isEmpty()) CACHE.put(want, new Cached(lines, source));
                 setLines(lines, why);
             }
         });
@@ -299,7 +339,7 @@ final class LockLyrics {
         setLines(Collections.<LyricLine>emptyList(), "demo loading");
         LyricSource.loadById(id, apple, new LyricSource.Callback() {
             @Override
-            public void onLines(List<LyricLine> lines, String why) {
+            public void onLines(List<LyricLine> lines, String why, int source) {
                 if (gen != sGen || !sDemo) return;
                 sLoading = false;
                 sDemoT0 = SystemClock.uptimeMillis();
@@ -318,12 +358,28 @@ final class LockLyrics {
         refresh();
     }
 
+    /** The SRC_ constant as something readable in a broadcast result. */
+    private static String srcName(int source) {
+        switch (source) {
+            case LyricSource.SRC_LYRIC_INFO:
+                return "session";
+            case LyricSource.SRC_DATABASE:
+                return "amll";
+            case LyricSource.SRC_NETEASE:
+                return "netease";
+            default:
+                return "none";
+        }
+    }
+
     static String describe() {
         LyricView v = sView;
         View c = Main.sContainer;
         View card = card();
         return "enabled=" + sEnabled + " demo=" + sDemo + " key=" + sKey + " lines=" + sLines.size()
-                + " (" + sWhy + ") pos=" + positionMs() + " playing=" + playing()
+                + " (" + sWhy + ") src=" + srcName(sSource)
+                + " sessionHasLyric=" + LyricSource.hasLyricInfo(sController)
+                + " pos=" + positionMs() + " playing=" + playing()
                 + " cover=" + Main.coverModeOn() + " screen=" + Main.screenOnCached()
                 + " phase=" + ClockCollapse.phase() + " cardP=" + Main.cardProgress()
                 + " container=" + (c == null ? "none" : c.getAlpha() + "/shown=" + c.isShown())
