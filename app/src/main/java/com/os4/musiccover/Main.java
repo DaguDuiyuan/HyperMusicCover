@@ -1222,6 +1222,15 @@ public class Main extends XposedModule {
 
     static void saveState() {
         if (sAppCtx == null) return;
+        // Never while loadState is still walking the file. Some of the setters it applies values
+        // through save as part of their own contract - setClockResponse does - and a save taken
+        // mid-parse writes every key the parse has NOT reached yet at its DEFAULT. `spring` sits
+        // ahead of mcart, mctext, mctap, lyrics, lyrickeep and lyrichdr in the file, so restoring
+        // a good file quietly rewrote it with those six off. The run itself looked fine, because
+        // the loop went on to fill memory in correctly from the copy it had already read; the
+        // damage only showed at the NEXT SystemUI start, which is why it read as "installing the
+        // app turns some switches off". loadState saves once at the end instead.
+        if (sLoading) return;
         try {
             java.io.FileOutputStream f =
                     new java.io.FileOutputStream(new java.io.File(sAppCtx.getFilesDir(), STATE_FILE));
@@ -1275,11 +1284,15 @@ public class Main extends XposedModule {
         main().postDelayed(sSaveState, 500L);
     }
 
+    /** Set while the file is being applied, to keep a setter from writing a half-read state back. */
+    private static volatile boolean sLoading;
+
     private static void loadState() {
         if (sAppCtx == null) return;
         java.io.File f = new java.io.File(sAppCtx.getFilesDir(), STATE_FILE);
         if (!f.exists()) return;
         boolean cover = false;
+        sLoading = true;
         try {
             byte[] buf = new byte[(int) f.length()];
             java.io.FileInputStream in = new java.io.FileInputStream(f);
@@ -1295,51 +1308,49 @@ public class Main extends XposedModule {
                     int eq = line.indexOf('=');
                     if (eq <= 0) continue;
                     String k = line.substring(0, eq).trim(), v = line.substring(eq + 1).trim();
-                    if ("cover".equals(k)) cover = "1".equals(v);
-                    // "auto" was a stored setting; following the card is unconditional now.
-                    else if ("bias".equals(k)) sBias = Float.parseFloat(v);
-                    else if ("clock".equals(k)) setClockHeightDp(Float.parseFloat(v));
-                    else if ("clocksize".equals(k)) setClockSize(Float.parseFloat(v));
-                    else if ("clockoff".equals(k)) setClockOffsetDp(Float.parseFloat(v));
-                    else if ("clockfull".equals(k)) ClockCollapse.restoreFullUnit(v);
-                    else if ("glass".equals(k)) sGlassEnd = Float.parseFloat(v);
-                    // Through the setter, the way "clock" is: the clamp and the push to the
-                    // wallpaper process are both part of reading the value back.
-                    else if ("spring".equals(k)) setClockResponse(Float.parseFloat(v));
-                    else if ("mcart".equals(k)) sMcHideArt = "1".equals(v);
-                    else if ("mctext".equals(k)) sMcCenterText = "1".equals(v);
-                    else if ("mctap".equals(k)) sMcTitleTap = "1".equals(v);
-                    else if ("tap".equals(k)) sTapToggle = "1".equals(v);
-                    else if ("fadewp".equals(k)) sFadeWp = "1".equals(v);
-                    else if ("hidefp".equals(k)) sHideFp = "1".equals(v);
-                    else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
-                    else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
-                    else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
-                    else if ("fpavoid".equals(k)) sFpAvoid = Integer.parseInt(v);
-                    else if (k.startsWith("shade_")) {
+                    // Every key in its own try. The loop's outer catch RETURNS, so without this
+                    // one unreadable value takes every setting BELOW it in the file down with it,
+                    // silently - and the log would say "loadState failed" without ever naming the
+                    // key. One bad number should cost its own setting and nothing else.
+                    try {
+                        if ("cover".equals(k)) cover = "1".equals(v);
+                        // "auto" was a stored setting; following the card is unconditional now.
+                        else if ("bias".equals(k)) sBias = Float.parseFloat(v);
+                        else if ("clock".equals(k)) setClockHeightDp(Float.parseFloat(v));
+                        else if ("clocksize".equals(k)) setClockSize(Float.parseFloat(v));
+                        else if ("clockoff".equals(k)) setClockOffsetDp(Float.parseFloat(v));
+                        else if ("clockfull".equals(k)) ClockCollapse.restoreFullUnit(v);
+                        else if ("glass".equals(k)) sGlassEnd = Float.parseFloat(v);
+                        // Through the setter, the way "clock" is: the clamp and the push to the
+                        // wallpaper process are both part of reading the value back.
+                        else if ("spring".equals(k)) setClockResponse(Float.parseFloat(v));
+                        else if ("mcart".equals(k)) sMcHideArt = "1".equals(v);
+                        else if ("mctext".equals(k)) sMcCenterText = "1".equals(v);
+                        else if ("mctap".equals(k)) sMcTitleTap = "1".equals(v);
+                        else if ("tap".equals(k)) sTapToggle = "1".equals(v);
+                        else if ("fadewp".equals(k)) sFadeWp = "1".equals(v);
+                        else if ("hidefp".equals(k)) sHideFp = "1".equals(v);
+                        else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
+                        else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
+                        else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
+                        else if ("fpavoid".equals(k)) sFpAvoid = Integer.parseInt(v);
                         // The whole shade settings page, in one prefix - the keys and their
                         // meaning belong to ShadeLayer.configure.
-                        //
-                        // Parsed in its OWN try, and that is not tidiness. This whole loop sits
-                        // inside one try whose catch RETURNS - so a single unreadable value here
-                        // would take cover mode down with it, silently, and the log would say
-                        // "loadState failed" without ever naming the key. The user would be left
-                        // with a lock screen that had quietly stopped working.
-                        try {
+                        else if (k.startsWith("shade_")) {
                             ShadeLayer.configure(k.substring(6), Integer.parseInt(v));
-                        } catch (Throwable ignored) {
-                            Xp.log(TAG + "shade setting unreadable, keeping the default: "
-                                    + k + "=" + v);
                         }
-                    }
-                    else if ("cardrect".equals(k)) {
-                        String[] r = v.split(",");
-                        // Same sanity check the sampler applies, because a file written before
-                        // it existed can hold a reading taken from the shade.
-                        if (r.length == 4 && Integer.parseInt(r[1]) >= sScreenH / 3) {
-                            sCardL = Integer.parseInt(r[0]); sCardT = Integer.parseInt(r[1]);
-                            sCardW = Integer.parseInt(r[2]); sCardH = Integer.parseInt(r[3]);
+                        else if ("cardrect".equals(k)) {
+                            String[] r = v.split(",");
+                            // Same sanity check the sampler applies, because a file written
+                            // before it existed can hold a reading taken from the shade.
+                            if (r.length == 4 && Integer.parseInt(r[1]) >= sScreenH / 3) {
+                                sCardL = Integer.parseInt(r[0]); sCardT = Integer.parseInt(r[1]);
+                                sCardW = Integer.parseInt(r[2]); sCardH = Integer.parseInt(r[3]);
+                            }
                         }
+                    } catch (Throwable t) {
+                        Xp.log(TAG + "setting unreadable, keeping the default: "
+                                + k + "=" + v + " (" + t + ")");
                     }
                     // "offdelay" was the pause timer, before the card became the switch.
                 }
@@ -1347,6 +1358,8 @@ public class Main extends XposedModule {
         } catch (Throwable t) {
             Xp.log(TAG + "loadState failed: " + t);
             return;
+        } finally {
+            sLoading = false;
         }
         Xp.log(TAG + "state restored: cover=" + cover + " bias=" + sBias);
         if (cover) {
