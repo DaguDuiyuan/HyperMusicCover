@@ -1557,6 +1557,26 @@ public class Main extends XposedModule {
                         // (2026-09-16 04:10) spent its last seconds in removeCallbacksAndMessages,
                         // which is only slow over a very long queue - this says whose it is.
                         setResultData(looperCensus());
+                    } else if ("slowlog".equals(op)) {
+                        // The framework's own slow-message log on the main looper: every message
+                        // that takes longer than `ms` to run is logged under the tag Looper with
+                        // its handler and callback. 0 turns it off. Only timing per message, so
+                        // cheap enough to leave on while a stutter is reproduced.
+                        int ms = i.getIntExtra("ms", 0);
+                        try {
+                            android.os.Looper.class.getMethod("setSlowLogThresholdMs",
+                                    long.class, long.class).invoke(
+                                    android.os.Looper.getMainLooper(), (long) ms, 0L);
+                            setResultData("slowlog " + (ms > 0 ? ms + "ms" : "off"));
+                        } catch (Throwable t) {
+                            setResultData("slowlog failed: " + t);
+                        }
+                    } else if ("twotap".equals(op)) {
+                        setResultData("twoFingerDowns=" + sTwoSeen + " fired=" + sTwoFired
+                                + " maxPointersSeen=" + sTwoMaxPointers + " trail=" + sTwoTrail
+                                + " lastTwoTrail=" + sTwoTrailLast + " cancelled=" + sTwoCancelled
+                                + " last=" + sTwoWhy
+                                + " lyrics=" + LockLyrics.sEnabled);
                     } else if ("lyricstate".equals(op)) {
                         String st = LockLyrics.describe();
                         Xp.log(TAG + "lyrics: " + st);
@@ -7376,7 +7396,9 @@ public class Main extends XposedModule {
      * fires only once it can no longer be the first half of a double tap. See armLockTap.
      */
     private static void feedTap(MotionEvent ev) {
-        if (!sTapToggle || ev == null) return;
+        if (ev == null) return;
+        feedTwoFingerTap(ev);
+        if (!sTapToggle) return;
         // A gesture the system took away is never going to produce the second tap.
         if (ev.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             cancelPendingTap("gesture cancelled");
@@ -7408,6 +7430,153 @@ public class Main extends XposedModule {
             sTapDetector.onTouchEvent(ev);
         } catch (Throwable ignored) {
         }
+    }
+
+    // ---- the two-finger tap: the lock screen's lyrics switch
+    /** Where the two fingers went down, and when; 0 = no candidate in progress. */
+    private static long sTwoDownAt;
+    private static float sTwoX0, sTwoY0, sTwoX1, sTwoY1;
+    /** Replaced by the framework's own slop as soon as there is a context to ask. */
+    private static float sTwoSlop = 48f;
+    /** The system cancelled this gesture. Watched on, not given up - see ACTION_CANCEL below. */
+    private static boolean sTwoCancelled;
+    /** Diagnostics for `op twotap`: how many two-finger downs were seen, and what became of them. */
+    private static int sTwoSeen, sTwoFired;
+    private static String sTwoWhy = "nothing yet";
+    private static int sTwoMaxPointers;
+
+    /**
+     * Two fingers tapped at once toggles the lyrics.
+     *
+     * Every other gesture on the cover is taken: one tap is the cover itself, two in a row is the
+     * OEM's sleep, a long press its lock screen editor. This one is free, and being anywhere on
+     * the screen it needs no control of its own.
+     *
+     * The single-tap detector is not disturbed by it: the lock screen cancels its own gesture the
+     * moment the second finger lands, and feedTap passes that cancel on to cancelPendingTap.
+     */
+    private static void feedTwoFingerTap(MotionEvent ev) {
+        if (ev.getPointerCount() > sTwoMaxPointers) sTwoMaxPointers = ev.getPointerCount();
+        noteTwoAction(ev);
+        switch (ev.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                sTwoDownAt = 0L;
+                sTwoCancelled = false;
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                // Not the end of the touch stream here, and not a reason to drop the candidate.
+                // The lock screen cancels as soon as the second finger lands - measured trail
+                // DdXuU, with no move in it at all (2026-09-16) - and then delivers the real
+                // POINTER_UP and UP to this window anyway. Giving up on the cancel is what made
+                // all eight two-finger taps of that recording do nothing. A gesture the system
+                // has genuinely taken away is kept from firing by the slop and the long-press
+                // timeout below, both of which still apply, and by the next DOWN clearing this.
+                if (sTwoDownAt != 0L) sTwoCancelled = true;
+                break;
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (ev.getPointerCount() != 2) {
+                    // A third finger: not this gesture.
+                    sTwoDownAt = 0L;
+                    sTwoWhy = "a third finger (" + ev.getPointerCount() + ")";
+                    break;
+                }
+                sTwoSeen++;
+                sTwoWhy = "two fingers down";
+                sTwoCancelled = false;
+                sTwoDownAt = ev.getEventTime();
+                sTwoX0 = ev.getX(0);
+                sTwoY0 = ev.getY(0);
+                sTwoX1 = ev.getX(1);
+                sTwoY1 = ev.getY(1);
+                if (sAppCtx != null) {
+                    sTwoSlop = android.view.ViewConfiguration.get(sAppCtx).getScaledTouchSlop()
+                            * 1.5f;
+                }
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (sTwoDownAt == 0L || ev.getPointerCount() < 2) break;
+                if (moved(ev.getX(0), ev.getY(0), sTwoX0, sTwoY0)
+                        || moved(ev.getX(1), ev.getY(1), sTwoX1, sTwoY1)) {
+                    // A pinch, a two-finger swipe, a scroll: not a tap.
+                    sTwoDownAt = 0L;
+                    sTwoWhy = "moved more than " + Math.round(sTwoSlop) + "px";
+                }
+                break;
+            case MotionEvent.ACTION_POINTER_UP:
+            case MotionEvent.ACTION_UP:
+                if (sTwoDownAt == 0L) break;
+                long held = ev.getEventTime() - sTwoDownAt;
+                sTwoDownAt = 0L;
+                if (held <= android.view.ViewConfiguration.getLongPressTimeout()) {
+                    onTwoFingerTap();
+                } else {
+                    sTwoWhy = "held " + held + "ms, too long";
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** The last gesture's actions, in order, for `op twotap`. */
+    private static final StringBuilder sTwoTrail = new StringBuilder();
+    /**
+     * The last gesture that had a second finger in it, kept whole. The live trail is overwritten
+     * by whatever is touched next, and a single tap on the way to reading it used to take the
+     * only record of the gesture being diagnosed with it.
+     */
+    private static String sTwoTrailLast = "";
+
+    private static void noteTwoAction(MotionEvent ev) {
+        int a = ev.getActionMasked();
+        if (a == MotionEvent.ACTION_DOWN) {
+            if (sTwoTrail.indexOf("d") >= 0) sTwoTrailLast = sTwoTrail.toString();
+            sTwoTrail.setLength(0);
+        }
+        if (a == MotionEvent.ACTION_MOVE && sTwoTrail.length() > 0
+                && sTwoTrail.charAt(sTwoTrail.length() - 1) == 'm') {
+            return;
+        }
+        if (sTwoTrail.length() > 40) return;
+        sTwoTrail.append(a == MotionEvent.ACTION_DOWN ? "D"
+                : a == MotionEvent.ACTION_POINTER_DOWN ? "d"
+                : a == MotionEvent.ACTION_MOVE ? "m"
+                : a == MotionEvent.ACTION_POINTER_UP ? "u"
+                : a == MotionEvent.ACTION_UP ? "U"
+                : a == MotionEvent.ACTION_CANCEL ? "X" : "?");
+    }
+
+    private static boolean moved(float x, float y, float fromX, float fromY) {
+        float dx = x - fromX, dy = y - fromY;
+        return dx * dx + dy * dy > sTwoSlop * sTwoSlop;
+    }
+
+    /**
+     * Switches the lyrics on or off, under the same guards as the cover's own tap: only the lock
+     * screen itself, not the bouncer, the control centre or a shade pulled down over an unlocked
+     * phone, and only while a track is on the card - there is nothing to show without one.
+     */
+    private static void onTwoFingerTap() {
+        View c = sContainer;
+        String no = !screenOn() ? "the screen is off"
+                : !keyguardShowing() ? "the keyguard is not showing"
+                : c == null ? "no clock container"
+                : !c.isShown() ? "the clock container is hidden"
+                : bouncerUp() ? "the bouncer is up"
+                : controlCenterUp() ? "the control centre is up"
+                : !sCardKnown ? "the card is not known"
+                : !sCardShowing ? "no track on the card"
+                : null;
+        if (no != null) {
+            sTwoWhy = "blocked: " + no;
+            return;
+        }
+        boolean on = !LockLyrics.sEnabled;
+        LockLyrics.setEnabled(on, sTrackKey, sWatched);
+        saveState();
+        sTwoFired++;
+        sTwoWhy = "lyrics " + (on ? "on" : "off");
+        Xp.log(TAG + "two-finger tap: lyrics " + (on ? "on" : "off"));
     }
 
     /**
