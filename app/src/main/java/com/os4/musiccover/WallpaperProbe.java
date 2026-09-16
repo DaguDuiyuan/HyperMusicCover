@@ -102,6 +102,17 @@ public class WallpaperProbe {
      */
     private static volatile Object sKeyguardEngine;
 
+    /**
+     * Every keyguard engine built, newest last.
+     *
+     * A foldable builds one engine per screen, and sKeyguardEngine above holds whichever was
+     * constructed last - so on those the cover can be pushed at a screen the user is not looking
+     * at, with nothing in the log to say so. Kept as a list first and picked between second,
+     * because which one is right is exactly the question the port has to answer.
+     */
+    private static final java.util.List<Object> sKeyguardEngines =
+            java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
     /** Renderer class names already reported by the diagnostic above; one line each. */
     private static final java.util.Set<String> sUploadNames =
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
@@ -685,6 +696,11 @@ public class WallpaperProbe {
             Xp.hookAllConstructors(eng, chain -> {
                 Object result = chain.proceed();
                 sKeyguardEngine = chain.getThisObject();
+                // Read the obfuscated member names off this instance before anything reaches for
+                // them. A foldable builds one engine per screen, so this also runs more than once
+                // there - resolve() is per engine class and returns at once after the first.
+                EngineNames.resolve(sKeyguardEngine);
+                noteEngineInstance(sKeyguardEngine);
                 Xp.log(TAG + "keyguard engine captured: " + sKeyguardEngine);
                 // From here the lock screen has an image engine, so this is the first moment a
                 // cover has somewhere to go - and by now the receiver above is up, which is what
@@ -1741,6 +1757,10 @@ public class WallpaperProbe {
                                 + " videoEngine=" + sVideoEngine);
                     } else if ("vgl".equals(op)) {
                         videoWindowTakeover(i.getBooleanExtra("on", true));
+                    } else if ("selftest".equals(op)) {
+                        String rep = selfTest();
+                        for (String line : rep.split("\n")) Xp.log(TAG + line);
+                        setResultData(rep);
                     } else {
                         Xp.log(TAG + "ops: cls --es name <fqcn> [--es grep x]"
                                 + " | bmp --es name <fqcn>");
@@ -1926,6 +1946,12 @@ public class WallpaperProbe {
             // What settles the pairing is the rest of that set: changeScrollWithScreen and g
             // kept their names across both builds, and those are what align the two lists.
             {"U", Boolean.FALSE},
+            // 8.0.8-flip-q18's name, off its bytecode: ImageEngineImpl.Z(Z) opens on
+            // `iget-boolean s:Z; if-eqz -> return; iget-object k:Handler; Handler.post(Runnable)`,
+            // which is the same post-a-frame shape as T/U above with the fields renamed (that
+            // build's guard is s where 7.0.7's is h). The sibling V(Z) is 563 code units of
+            // surface work and is NOT this - it is the one to avoid calling by accident.
+            {"Z", Boolean.FALSE},
             // The OEM's own showKeyguardWallpaper(ZI)/hideKeyguardWallpaper(ZI) take a boolean
             // and an int, so a build that widened the frame request the same way is worth one
             // more try. 0 is the no-animation value everywhere these appear.
@@ -2012,6 +2038,92 @@ public class WallpaperProbe {
         reloadEngine(eng);
     }
 
+    /**
+     * Records an engine instance and says what distinguishes it from the others.
+     *
+     * The int fields are dumped because on the multi-display build they are what tells the
+     * instances apart: MultiDisplayEngineService.b is `which` - the value
+     * MiuiWallpaperManager.isLockWhich reads to separate the lock engine from the desktop one -
+     * and c is what it passes to WallpaperServiceController alongside it. Neither is named in a
+     * way that can be relied on, so they are reported rather than interpreted.
+     */
+    private static void noteEngineInstance(Object eng) {
+        if (eng == null) return;
+        if (!sKeyguardEngines.contains(eng)) sKeyguardEngines.add(eng);
+        Xp.log(TAG + "keyguard engine #" + sKeyguardEngines.size() + ": " + describeEngine(eng));
+    }
+
+    /** One engine instance: its class, its identity, and every int it carries. */
+    private static String describeEngine(Object eng) {
+        StringBuilder sb = new StringBuilder(eng.getClass().getSimpleName())
+                .append('@').append(Integer.toHexString(System.identityHashCode(eng)));
+        try {
+            for (Class<?> k = eng.getClass(); k != null && k != Object.class;
+                 k = k.getSuperclass()) {
+                for (java.lang.reflect.Field f : k.getDeclaredFields()) {
+                    if (f.getType() != int.class || Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    sb.append(' ').append(k.getSimpleName()).append('.').append(f.getName())
+                            .append('=').append(f.getInt(eng));
+                }
+            }
+        } catch (Throwable t) {
+            sb.append(" (ints unreadable: ").append(t).append(')');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Everything a port to an unseen build needs, in one answer.
+     *
+     * Written for the case where the phone is someone else's: they run this once (or just send
+     * the LSPosed log, which this also goes to) and it has to be enough to work out what moved,
+     * without a second round trip. So it reports what was RESOLVED, what it was resolved to, and
+     * the candidates for anything that was not - never just "failed".
+     */
+    static String selfTest() {
+        StringBuilder sb = new StringBuilder("=== wallpaper self test ===");
+        sb.append("\nwallpaper package: ").append(wallpaperVersion());
+        sb.append('\n').append(EngineNames.report());
+        sb.append("\nkeyguard engines: ").append(sKeyguardEngines.size());
+        synchronized (sKeyguardEngines) {
+            for (int n = 0; n < sKeyguardEngines.size(); n++) {
+                Object e = sKeyguardEngines.get(n);
+                sb.append("\n  #").append(n + 1).append(' ').append(describeEngine(e))
+                        .append(e == sKeyguardEngine ? "   <- the one being pushed to" : "");
+            }
+        }
+        sb.append("\ndesktop engine: ").append(sDesktopEngine == null ? "none"
+                : describeEngine(sDesktopEngine));
+        sb.append("\nvideo engine: ").append(sVideoEngine == null ? "none"
+                : sVideoEngine.getClass().getSimpleName());
+        sb.append("\nframe request: ").append(sFrameReq < 0 ? "none has answered yet"
+                : FRAME_REQUESTS[sFrameReq][0] + "() (candidate " + (sFrameReq + 1) + " of "
+                        + FRAME_REQUESTS.length + ")");
+        Object eng = sKeyguardEngine;
+        if (eng != null) {
+            sb.append("\n  (Z)V methods here: ").append(oneBooleanMethods(eng));
+        }
+        sb.append("\nart: ").append(describe(sArt)).append("  orig: ").append(describe(sOrig));
+        sb.append("\ntexture: ").append(sKeyguardTexture == null ? "not captured" : "captured");
+        sb.append("\ngpu fade: on=").append(sGpuFadeOn).append(" hooked=").append(sDrawHooked)
+                .append(" broken=").append(sGpuFadeBroken);
+        return sb.toString();
+    }
+
+    /** The wallpaper app's own version, which is what a report has to be read against. */
+    private static String wallpaperVersion() {
+        try {
+            Context c = sCtx;
+            if (c == null) return "unknown (no context)";
+            android.content.pm.PackageInfo pi =
+                    c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
+            return pi.packageName + " " + pi.versionName + " (" + pi.versionCode + ")";
+        } catch (Throwable t) {
+            return "unknown: " + t;
+        }
+    }
+
     private static void reloadEngine(Object eng) {
         reloadEngine(eng, false);
     }
@@ -2030,10 +2142,20 @@ public class WallpaperProbe {
         } catch (Throwable t) {
             Xp.log(TAG + "reload: u() failed: " + t);
         }
-        try {
-            Xp.setBooleanField(eng, "b", true);
-        } catch (Throwable t) {
-            Xp.log(TAG + "reload: the pending-surface field failed: " + t);
+        // Resolved, never assumed. On the multi-display build this flag is called `w`, and the
+        // name `b` that it has on 7.0.7 belongs there to an int holding `which` - so writing `b`
+        // blind is not a miss, it is a write onto the engine's own lock-or-desktop identity.
+        // EngineNames only hands back a name it has confirmed is a boolean.
+        String flag = EngineNames.pendingFlag;
+        if (flag == null) {
+            Xp.log(TAG + "reload: no pending-surface flag resolved; the frame will redraw what is "
+                    + "uploaded instead of re-reading it. " + EngineNames.report());
+        } else {
+            try {
+                Xp.setBooleanField(eng, flag, true);
+            } catch (Throwable t) {
+                Xp.log(TAG + "reload: the pending-surface field '" + flag + "' failed: " + t);
+            }
         }
         if (frameRequest(eng, keepAlive)) {
             // Not per frame: a fade asks for a reload every frame, and this log goes through
