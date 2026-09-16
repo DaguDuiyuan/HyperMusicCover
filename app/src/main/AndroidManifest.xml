@@ -15,6 +15,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
+        <!-- Whether a lyric provider module is installed, for the notice on the lyrics page.
+             Declared because package visibility is filtered from Android 11 on: without this the
+             lookup throws NameNotFound even when the package is there. -->
+        <package android:name="com.lidesheng.lyricinfo" />
+        <package android:name="com.lidesheng.lyricinfo.lite" />
         <package android:name="com.tencent.mobileqq" />
         <package android:name="com.tencent.tim" />
         <package android:name="com.tencent.mobileqqi" />

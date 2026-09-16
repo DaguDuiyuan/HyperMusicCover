@@ -84,6 +84,15 @@ object ModuleBridge {
         val lyricsKeepOn: Boolean = false,
         /** Draw the singing words brighter than white on an HDR screen. */
         val lyricsHdr: Boolean = false,
+        /**
+         * A session has actually carried its own lyric since SystemUI started.
+         *
+         * Not the same question as whether a provider module is installed, and the difference is
+         * the one worth showing the user: LyricInfo is an LSPosed module, and one that is
+         * installed but not enabled - or enabled without the player in its scope - writes
+         * nothing while still being in the package list.
+         */
+        val sessionLyric: Boolean = false,
         /** 0 system default, 1 never avoid the fingerprint icon, 2 always avoid it. */
         val fpAvoid: Int = 0,
         /**
@@ -424,6 +433,7 @@ object ModuleBridge {
             lyrics = b.getBoolean("lyrics", false),
             lyricsKeepOn = b.getBoolean("lyrickeep", false),
             lyricsHdr = b.getBoolean("lyrichdr", false),
+            sessionLyric = b.getBoolean("sessionlyric", false),
             fpAvoid = b.getInt("fpavoid", 0),
             shade = b.keySet()
                 .filter { it.startsWith("shade_") }

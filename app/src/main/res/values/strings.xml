@@ -103,8 +103,13 @@
     <string name="card_center_text">标题居中</string>
     <string name="card_title_tap">点击歌名暂停播放</string>
     <string name="lock_lyrics">锁屏歌词</string>
-    <string name="lock_lyrics_summary">封面模式下在时钟和卡片之间显示歌词，需要联网</string>
-    <string name="lyrics_hdr">HDR 高光歌词</string>
+    <string name="lock_lyrics_summary">封面模式下在时钟和卡片之间显示歌词，双指单击可在封面和歌词之间切换</string>
+    <string name="lyrics_provider_title_missing">请安装LyricInfo</string>
+    <string name="lyrics_provider_title_idle">LyricInfo已安装</string>
+    <string name="lyrics_provider_got_it">知道了</string>
+    <string name="lyrics_provider_missing">未安装则歌词获取可能不成功</string>
+    <string name="lyrics_provider_idle">请在 LSPosed 里确认模块已启用、并在作用域里勾选你用的播放器，然后重启系统界面。</string>
+    <string name="lyrics_hdr">HDR 高光歌词（实验性功能）</string>
     <string name="lyrics_hdr_summary">长音结尾发光时在 HDR 屏幕上以更高亮度显示</string>
     <string name="lyrics_keep_on">播放歌词时屏幕常亮</string>
     <string name="lyrics_keep_on_summary">锁屏显示歌词且正在播放时不自动息屏，暂停后恢复</string>
@@ -144,7 +149,7 @@
     <!-- The features page is a list of cards, each opening a page of its own. -->
     <string name="features_cover_title">锁屏音乐封面</string>
     <string name="features_cover_summary">封面、时钟、媒体卡片</string>
-    <string name="features_shade_title">通控中心</string>
+    <string name="features_shade_title">通控中心（实验性功能）</string>
     <string name="features_shade_summary">动态流光</string>
 
     <string name="shade_enabled">启用流光效果</string>

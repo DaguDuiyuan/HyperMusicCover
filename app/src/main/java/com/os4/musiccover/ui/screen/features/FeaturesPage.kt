@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.edit
 import com.os4.musiccover.CoverActivity
 import com.os4.musiccover.ModuleBridge
 import com.os4.musiccover.R
@@ -31,11 +32,14 @@ import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
+import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.window.WindowDialog
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
 
@@ -389,6 +393,54 @@ private fun LyricsGroup(
     onChange: (ModuleBridge.State) -> Unit,
 ) {
     val context = LocalContext.current
+    // Whether a provider module is installed is a fact about the package list and does not
+    // change while the page is open; whether one is working comes from the module.
+    val providerInstalled = remember {
+        LYRIC_PROVIDERS.any {
+            try {
+                context.packageManager.getPackageInfo(it, 0)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+    }
+    // Advice, not a gate, and said once. The switch works without any provider module - the
+    // lyrics are found by name over the network - so this is worth saying rather than standing
+    // in the way, and worth saying only until it has been read.
+    // Title and body together: the two cases say opposite things about whether the module is
+    // there, so they cannot share a heading - "please install it" over "it is installed" is how
+    // that reads to whoever gets the wrong one.
+    val notice = when {
+        module.sessionLyric -> null
+        providerInstalled ->
+            R.string.lyrics_provider_title_idle to R.string.lyrics_provider_idle
+        else ->
+            R.string.lyrics_provider_title_missing to R.string.lyrics_provider_missing
+    }
+    var showNotice by remember { mutableStateOf(false) }
+    LaunchedEffect(notice, module.alive) {
+        // Only once the module has answered: before that every field reads as its default, and
+        // "no lyric has ever arrived" would be the state of a phone that had simply not been
+        // asked yet.
+        if (notice != null && module.alive && !LyricsNotice.seen(context)) {
+            showNotice = true
+            LyricsNotice.markSeen(context)
+        }
+    }
+    WindowDialog(
+        show = showNotice,
+        title = stringResource(notice?.first ?: R.string.lyrics_provider_title_missing),
+        summary = notice?.second?.let { stringResource(it) },
+        onDismissRequest = { showNotice = false },
+    ) {
+        val dismiss = LocalDismissState.current
+        TextButton(
+            modifier = Modifier.fillMaxWidth(),
+            text = stringResource(R.string.lyrics_provider_got_it),
+            onClick = { dismiss?.invoke() },
+        )
+    }
     Column {
         SwitchPreference(
             title = stringResource(R.string.lock_lyrics),
@@ -591,4 +643,35 @@ private const val SETTLE_MS = 200L
 private fun format(v: Float): String {
     val hundredths = (v * 100f).roundToInt()
     return "${hundredths / 100}.${(hundredths % 100).toString().padStart(2, '0')}"
+}
+
+/**
+ * Provider modules that write a whole lyric to the media session, where we read it.
+ *
+ * Both variants of LyricInfo. Declared in the manifest's <queries> as well, or the lookup throws
+ * NameNotFound on Android 11 and up whether or not the package is installed.
+ */
+private val LYRIC_PROVIDERS = listOf(
+    "com.lidesheng.lyricinfo",
+    "com.lidesheng.lyricinfo.lite",
+)
+
+/**
+ * Remembers that the lyric-provider advice has been read.
+ *
+ * Belongs to the app rather than the module: it is about what this phone's owner has been told,
+ * not about how the lock screen behaves, and it has to survive the module being restarted.
+ */
+private object LyricsNotice {
+    private const val PREFS_NAME = "lyrics_notice"
+    private const val KEY_SEEN = "provider_seen"
+
+    fun seen(context: android.content.Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .getBoolean(KEY_SEEN, false)
+
+    fun markSeen(context: android.content.Context) {
+        context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+            .edit { putBoolean(KEY_SEEN, true) }
+    }
 }

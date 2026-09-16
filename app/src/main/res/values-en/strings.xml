@@ -103,8 +103,13 @@
     <string name="card_center_text">Centre the title</string>
     <string name="card_title_tap">Tap the title to pause</string>
     <string name="lock_lyrics">Lock screen lyrics</string>
-    <string name="lock_lyrics_summary">Shows lyrics between the clock and the card in cover mode. Needs network</string>
-    <string name="lyrics_hdr">HDR highlight</string>
+    <string name="lock_lyrics_summary">Shows lyrics between the clock and the card in cover mode. A two-finger tap switches between the cover and the lyrics</string>
+    <string name="lyrics_provider_title_missing">Please install LyricInfo</string>
+    <string name="lyrics_provider_title_idle">LyricInfo is installed</string>
+    <string name="lyrics_provider_got_it">Got it</string>
+    <string name="lyrics_provider_missing">Without it, fetching lyrics may fail.</string>
+    <string name="lyrics_provider_idle">In LSPosed, check that the module is enabled and that your player is in its scope, then restart the system UI.</string>
+    <string name="lyrics_hdr">HDR highlight (experimental)</string>
     <string name="lyrics_hdr_summary">The glow at the end of a held note goes brighter than white on an HDR screen</string>
     <string name="lyrics_keep_on">Keep the screen on for lyrics</string>
     <string name="lyrics_keep_on_summary">The lock screen stays lit while lyrics are showing and music plays. Sleeps again when paused</string>
@@ -144,7 +149,7 @@
     <!-- The features page is a list of cards, each opening a page of its own. -->
     <string name="features_cover_title">Lockscreen music cover</string>
     <string name="features_cover_summary">Cover, clock, media card</string>
-    <string name="features_shade_title">Shade and control centre</string>
+    <string name="features_shade_title">Shade and control centre (experimental)</string>
     <string name="features_shade_summary">Flowing light</string>
 
     <string name="shade_enabled">Enable flowing light</string>

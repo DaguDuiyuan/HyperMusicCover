@@ -1305,6 +1305,12 @@ public class Main extends XposedModule {
                     + "\nlyrics=" + (LockLyrics.sEnabled ? 1 : 0)
                     + "\nlyrickeep=" + (LockLyrics.sKeepOn ? 1 : 0)
                     + "\nlyrichdr=" + (LockLyrics.sHdr ? 1 : 0)
+                    // Not a setting - whether the last lookup got its lyric from the session.
+                    // Kept across restarts so the settings page does not accuse a working
+                    // provider module of doing nothing merely because nothing has played yet;
+                    // updated in both directions so it stops claiming one is working once it
+                    // is not.
+                    + "\nsawlyric=" + (LockLyrics.sSawSessionLyric ? 1 : 0)
                     + "\nfpavoid=" + sFpAvoid
                     // Not a setting - a measurement. Kept so the app's preview is to scale from
                     // the first frame after a SystemUI restart, instead of only once the phone
@@ -1381,6 +1387,9 @@ public class Main extends XposedModule {
                         else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
                         else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
                         else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
+                        else if ("sawlyric".equals(k)) {
+                            LockLyrics.sSawSessionLyric = "1".equals(v);
+                        }
                         else if ("fpavoid".equals(k)) sFpAvoid = Integer.parseInt(v);
                         // The whole shade settings page, in one prefix - the keys and their
                         // meaning belong to ShadeLayer.configure.
@@ -1825,6 +1834,10 @@ public class Main extends XposedModule {
                         out.putBoolean("lyrics", LockLyrics.sEnabled);
                         out.putBoolean("lyrickeep", LockLyrics.sKeepOn);
                         out.putBoolean("lyrichdr", LockLyrics.sHdr);
+                        // Whether anything has actually written a lyric to a session, which is
+                        // what tells a working provider module from a merely installed one.
+                        out.putBoolean("sessionlyric", LockLyrics.sSawSessionLyric
+                                || LyricSource.hasLyricInfo(sWatched));
                         out.putInt("fpavoid", sFpAvoid);
                         // Everything the app's preview needs to be to scale. It draws a lock
                         // screen it cannot see, and every one of these is device-specific, so

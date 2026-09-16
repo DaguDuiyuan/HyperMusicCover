@@ -83,6 +83,17 @@ final class LockLyrics {
     private static View sCard;
     private static long sCardLookAt;
 
+    /**
+     * A session has carried its own lyric at some point since SystemUI started.
+     *
+     * The settings page asks, to tell "a provider module is installed" apart from "a provider
+     * module is working". Those are different: LyricInfo is an LSPosed module, and one that is
+     * installed but not enabled, or enabled without the player in its scope, writes nothing at
+     * all while still being present in the package list. Only having read a real lyric off a
+     * session proves the whole chain.
+     */
+    static boolean sSawSessionLyric;
+
     /** Lines plus the route they came by - a cache hit has to answer both. */
     private static final class Cached {
         final List<LyricLine> lines;
@@ -221,6 +232,24 @@ final class LockLyrics {
                 }
                 sLoading = false;
                 sSource = source;
+                // What the LAST lookup found, not what any lookup ever found.
+                //
+                // It has to fall as well as rise. Written once and kept, it said "a provider
+                // module is working" for as long as the file lasted - so disabling the module
+                // and restarting left the settings page still convinced, and the advice that
+                // should have appeared never did.
+                //
+                // SRC_NONE is deliberately not an answer either way: finding nothing can mean
+                // the network was down or the song simply has no lyrics anywhere, neither of
+                // which says anything about the provider.
+                if (source == LyricSource.SRC_LYRIC_INFO || source == LyricSource.SRC_DATABASE
+                        || source == LyricSource.SRC_NETEASE) {
+                    boolean fromSession = source == LyricSource.SRC_LYRIC_INFO;
+                    if (fromSession != sSawSessionLyric) {
+                        sSawSessionLyric = fromSession;
+                        Main.saveState();
+                    }
+                }
                 if (!lines.isEmpty()) CACHE.put(want, new Cached(lines, source));
                 setLines(lines, why);
             }
