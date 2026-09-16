@@ -75,7 +75,23 @@ public class WallpaperProbe {
      */
     private static volatile boolean sTexFit = true;
     private static volatile Object sKeyguardTexture;
-    private static Bitmap sScreenArt;
+    /**
+     * The size each keyguard texture was last uploaded at, so getTextureDimensions can answer for
+     * the texture being asked about instead of for whichever screen uploaded most recently.
+     * Weak, because these are the OEM's objects and a screen that goes away takes its own with it.
+     */
+    private static final java.util.Map<Object, android.graphics.Rect> sTexSizes =
+            java.util.Collections.synchronizedMap(
+                    new java.util.WeakHashMap<Object, android.graphics.Rect>());
+    /**
+     * Fitted copies of one source, keyed by the surface they were cut for.
+     *
+     * A map rather than a single bitmap because a foldable asks for more than one size and keeps
+     * asking: the inner and outer screens each upload with their own renderer, so a single slot
+     * was re-cut on every hand-over. Cleared whole when the source changes, which is the only
+     * time these stop being wanted.
+     */
+    private static final java.util.HashMap<Long, Bitmap> sScreenArts = new java.util.HashMap<>();
     private static Bitmap sScreenArtOf;
     private static volatile int sReportedW, sReportedH;
 
@@ -504,14 +520,32 @@ public class WallpaperProbe {
                 if (keyguard && args.length > 0 && args[0] instanceof Bitmap) {
                     Bitmap orig = (Bitmap) args[0];
                     sKeyguardRenderer = chain.getThisObject();
-                    if (sKeyguardTexture == null) {
-                        // Kept so the dimension hook can tell the keyguard's texture from the
-                        // desktop one's: same class, two instances, and only one of them is ours.
-                        try {
-                            sKeyguardTexture = Xp.getObjectField(chain.getThisObject(), "mTexture");
-                        } catch (Throwable ignored) {
-                        }
+                    // Kept so the dimension hook can tell the keyguard's texture from the
+                    // desktop one's: same class, two instances, and only one of them is ours.
+                    //
+                    // Re-read on every upload rather than only the first. A foldable has a
+                    // renderer per screen - five of them on the q18 build - each with its own
+                    // texture, and holding the first one seen meant the dimension hook stopped
+                    // recognising the texture as soon as another screen drew. This branch is
+                    // already inside `if (keyguard)`, so whatever it finds here is a keyguard
+                    // texture; the only question is which screen's, and the answer is always
+                    // the one uploading right now.
+                    try {
+                        Object t = Xp.getObjectField(chain.getThisObject(), "mTexture");
+                        if (t != null) sKeyguardTexture = t;
+                    } catch (Throwable ignored) {
                     }
+                    // BEFORE the fit below, not after. screenSized() crops to sSurfaceW/H, and
+                    // those used to be written further down by noteRenderState - i.e. they held
+                    // whichever renderer uploaded LAST. On one screen that is the same size and
+                    // nothing shows; on a foldable it is routinely a different screen, so the
+                    // picture was cropped for one screen and handed to another. The measured
+                    // shape of that is a viewport and an upload that disagree:
+                    // `viewport=Rect(0,0-2364,1672) mvpFrom=Rect(0,0-1168,1712) upload=1168x1712`
+                    // - the cover cropped for the outer screen, uploaded to the inner one.
+                    // Reading it off THIS renderer makes the crop, the MVP source and the
+                    // viewport the same screen's by construction.
+                    adoptSurfaceOf(chain.getThisObject());
                     // The experiment's other half. Everything below - the fade size check, the
                     // art fit, sReportedW/H that fittedArt() scales by - then sees the screen's
                     // size rather than the wallpaper file's, which is the whole point.
@@ -525,6 +559,12 @@ public class WallpaperProbe {
                         sReportedW = w;
                         sReportedH = h;
                         Xp.log(TAG + "keyguard texture is " + w + "x" + h);
+                    }
+                    // Remembered against the texture itself, because the MVP matrix is built
+                    // later, off whatever getTextureDimensions answers then - by which time
+                    // another screen may have uploaded.
+                    if (sKeyguardTexture != null) {
+                        sTexSizes.put(sKeyguardTexture, new android.graphics.Rect(0, 0, w, h));
                     }
                     noteRenderState(chain.getThisObject(), w, h);
                     // A GPU fade's far end. Uploaded once, and from then on the fade is drawn
@@ -641,7 +681,16 @@ public class WallpaperProbe {
                     "com.miui.miwallpaper.opengl.ImageWallpaperRenderer$WallpaperTexture", sCl);
             Xp.hookAll(tex, "getTextureDimensions", chain -> {
                 Object self = chain.getThisObject();
-                if (!sTexFit || self == null || self != sKeyguardTexture) return chain.proceed();
+                if (!sTexFit || self == null) return chain.proceed();
+                // What THIS texture was last given, not what the last upload anywhere was. On a
+                // foldable the two are routinely different screens, and answering with the other
+                // one's size builds the MVP matrix from a rectangle the uploaded bitmap does not
+                // have - the picture then lands scaled and offset, which is exactly the symptom
+                // that only a fold or a rotation could clear. The map holds keyguard textures
+                // only, so the desktop's still gets the OEM's own answer.
+                android.graphics.Rect r = sTexSizes.get(self);
+                if (r != null) return r;
+                if (self != sKeyguardTexture) return chain.proceed();
                 int w = sSurfaceW, h = sSurfaceH;
                 if (w <= 0 || h <= 0) return chain.proceed();
                 return new android.graphics.Rect(0, 0, w, h);
@@ -927,16 +976,16 @@ public class WallpaperProbe {
      * the triple CHANGES, so a steady state costs one string compare per upload and says
      * nothing, and the frame that moves the picture is the one that prints.
      */
-    private static void noteRenderState(Object renderer, int w, int h) {
-        if (sRenderStateFailed) return;
+    /**
+     * Takes this renderer's surface as the screen to fit to.
+     *
+     * The one place the SCREEN's own size is knowable in this process, and on a foldable it is a
+     * different answer per renderer - so it is read from the renderer that is about to upload,
+     * immediately before the crop that uses it, rather than left over from the last one.
+     */
+    private static void adoptSurfaceOf(Object renderer) {
         try {
             Object surface = Xp.getObjectField(renderer, "mSurfaceSize");
-            Object texture = Xp.getObjectField(renderer, "mTexture");
-            Object dims = texture == null ? null
-                    : Xp.callMethod(texture, "getTextureDimensions");
-            // Read before the early return below: this is the only place the SCREEN's own size
-            // is knowable in this process, and startFade() needs it on every fade, not only on
-            // the frames where something changed.
             if (surface instanceof android.graphics.Rect) {
                 android.graphics.Rect r = (android.graphics.Rect) surface;
                 if (r.width() > 0 && r.height() > 0) {
@@ -944,6 +993,17 @@ public class WallpaperProbe {
                     sSurfaceH = r.height();
                 }
             }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void noteRenderState(Object renderer, int w, int h) {
+        if (sRenderStateFailed) return;
+        try {
+            Object surface = Xp.getObjectField(renderer, "mSurfaceSize");
+            Object texture = Xp.getObjectField(renderer, "mTexture");
+            Object dims = texture == null ? null
+                    : Xp.callMethod(texture, "getTextureDimensions");
             String now = "viewport=" + surface + " mvpFrom=" + dims
                     + " upload=" + w + "x" + h;
             if (now.equals(sRenderState)) return;
@@ -2104,6 +2164,21 @@ public class WallpaperProbe {
         if (eng != null) {
             sb.append("\n  (Z)V methods here: ").append(oneBooleanMethods(eng));
         }
+        // The three numbers that decide where the picture lands. On one screen they are always
+        // the same; where they differ, they name the two screens that got crossed.
+        sb.append("\nrender state: ").append(sRenderState.isEmpty() ? "no upload yet" : sRenderState);
+        sb.append("\nsurface adopted: ").append(sSurfaceW).append('x').append(sSurfaceH);
+        synchronized (sTexSizes) {
+            sb.append("\ntexture sizes held: ").append(sTexSizes.size());
+            for (java.util.Map.Entry<Object, android.graphics.Rect> e : sTexSizes.entrySet()) {
+                sb.append("\n  ").append(e.getKey().getClass().getSimpleName())
+                        .append('@').append(Integer.toHexString(System.identityHashCode(e.getKey())))
+                        .append(" -> ").append(e.getValue().width()).append('x')
+                        .append(e.getValue().height())
+                        .append(e.getKey() == sKeyguardTexture ? "  <- current" : "");
+            }
+        }
+        sb.append("\ncuts held: ").append(sScreenArts.size());
         sb.append("\nart: ").append(describe(sArt)).append("  orig: ").append(describe(sOrig));
         sb.append("\ntexture: ").append(sKeyguardTexture == null ? "not captured" : "captured");
         sb.append("\ngpu fade: on=").append(sGpuFadeOn).append(" hooked=").append(sDrawHooked)
@@ -2598,16 +2673,25 @@ public class WallpaperProbe {
      * Null for the three cases that must not be touched: the experiment is off, the surface size
      * is not known yet (the first upload of a process runs before onSurfaceChanged has set it),
      * or the bitmap is already that size. Cached per source, because the source is either the
-     * module's own art or the OEM's one wallpaper and both repeat.
+     * module's own art or the OEM's one wallpaper and both repeat - and per SIZE within that,
+     * because a foldable alternates between its screens and each wants its own cut.
+     *
+     * The size comes from sSurfaceW/H, which the caller has just read off the renderer doing
+     * this upload. Taking it from anywhere else is what cropped the cover for one screen and
+     * handed it to another.
      */
     private static Bitmap screenSized(Bitmap src) {
         int w = sSurfaceW, h = sSurfaceH;
         if (!sTexFit || src == null || w <= 0 || h <= 0) return null;
         if (src.getWidth() == w && src.getHeight() == h) return null;
-        if (sScreenArt != null && sScreenArtOf == src
-                && sScreenArt.getWidth() == w && sScreenArt.getHeight() == h) {
-            return sScreenArt;
+        // A new source makes every cut of the old one useless at once.
+        if (sScreenArtOf != src) {
+            sScreenArts.clear();
+            sScreenArtOf = src;
         }
+        Long key = ((long) w << 32) | (h & 0xffffffffL);
+        Bitmap have = sScreenArts.get(key);
+        if (have != null && !have.isRecycled()) return have;
         Bitmap fitted;
         try {
             fitted = centerCrop(src, w, h);
@@ -2615,12 +2699,14 @@ public class WallpaperProbe {
             Xp.log(TAG + "screen-size fit failed: " + t);
             return null;
         }
-        Bitmap old = sScreenArt;
-        if (old != null && old != src && old != sArt) old.recycle();
-        sScreenArt = fitted;
-        sScreenArtOf = src;
+        // Nothing is recycled here. The old cut used to be freed on the spot, which is right
+        // when there is one screen and wrong the moment there are two: the other screen's
+        // renderer can still be drawing from the cut this one is replacing, and a recycled
+        // bitmap under GL is a black wallpaper, not an exception anyone sees. The collector
+        // frees them once the map drops them.
+        sScreenArts.put(key, fitted);
         Xp.log(TAG + "texture fitted to the screen: " + describe(src)
-                + " -> " + describe(fitted));
+                + " -> " + describe(fitted) + " (" + sScreenArts.size() + " cut(s) held)");
         return fitted;
     }
 
