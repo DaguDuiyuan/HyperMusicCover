@@ -442,6 +442,71 @@ final class LyricSource {
         }
     }
 
+    /**
+     * Every key the session is publishing, with enough of each value to recognise it.
+     *
+     * Which players this feature covers is decided entirely by what they put on the session, and
+     * that cannot be reasoned about - only read. Players differ in whether they publish lyrics at
+     * all, under `lyricInfo` or a key of their own, whether MEDIA_ID is the platform's id or an
+     * internal uri, and whether the title is the song or (for one local player) the current lyric
+     * line. So this lists the keys rather than looking for the ones already known: a key nobody
+     * here has heard of is exactly what widening the coverage needs to find.
+     *
+     * Values are cut short and bitmaps are reduced to their size, because a lyric payload is tens
+     * of kilobytes and the point is to see WHICH keys carry something, not to read the words.
+     */
+    static String dumpMetadata(MediaController c) {
+        if (c == null) return "no session being watched";
+        MediaMetadata md;
+        try {
+            md = c.getMetadata();
+        } catch (Throwable t) {
+            return c.getPackageName() + ": getMetadata threw " + t;
+        }
+        if (md == null) return c.getPackageName() + ": no metadata";
+        StringBuilder sb = new StringBuilder(c.getPackageName());
+        sb.append('\n');
+        java.util.Set<String> keys;
+        try {
+            keys = md.keySet();
+        } catch (Throwable t) {
+            return sb.append("keySet threw ").append(t).toString();
+        }
+        java.util.List<String> sorted = new java.util.ArrayList<>(keys);
+        java.util.Collections.sort(sorted);
+        for (String k : sorted) {
+            sb.append("  ").append(k).append(" = ").append(valueOf(md, k)).append('\n');
+        }
+        sb.append("  -> id=").append(idOf(c))
+                .append(" lyricInfo=").append(lyricInfoOf(c) == null ? "no" : "yes");
+        return sb.toString();
+    }
+
+    /** One metadata value, short enough to read and typed enough to act on. */
+    private static String valueOf(MediaMetadata md, String k) {
+        try {
+            android.graphics.Bitmap b = md.getBitmap(k);
+            if (b != null) return "Bitmap[" + b.getWidth() + "x" + b.getHeight() + "]";
+        } catch (Throwable ignored) {
+        }
+        try {
+            CharSequence cs = md.getText(k);
+            if (cs != null) {
+                String s = cs.toString();
+                String cut = s.length() > 160 ? s.substring(0, 160) + "..." : s;
+                // Newlines would break the one-key-per-line shape a reader relies on.
+                return "(" + s.length() + " chars) " + cut.replace("\n", "\\n");
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            long l = md.getLong(k);
+            if (l != 0L) return String.valueOf(l);
+        } catch (Throwable ignored) {
+        }
+        return "(empty or of another type)";
+    }
+
     private static String read(InputStream in) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream(32768);
         byte[] buf = new byte[8192];

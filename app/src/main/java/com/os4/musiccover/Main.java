@@ -1583,6 +1583,10 @@ public class Main extends XposedModule {
                         // Also as the broadcast's result, which `am broadcast` prints: on a
                         // phone whose LSPosed log drops INFO lines this is the only way to read it.
                         setResultData(st);
+                    } else if ("metadump".equals(op)) {
+                        String d = LyricSource.dumpMetadata(sWatched);
+                        Xp.log(TAG + "metadump: " + d);
+                        setResultData(d);
                     } else if ("hidefp".equals(op)) {
                         sHideFp = i.getBooleanExtra("on", !sHideFp);
                         saveState();
