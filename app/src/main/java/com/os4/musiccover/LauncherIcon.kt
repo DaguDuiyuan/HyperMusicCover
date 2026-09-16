@@ -42,8 +42,15 @@ object LauncherIcon {
 }
 
 /**
- * Opens the app when [LauncherIcon.SECRET_CODE] is dialled, the same way InstallerX does. The
- * manifest filter already restricts the action and the code, so anything that arrives is ours.
+ * Opens the app when [LauncherIcon.SECRET_CODE] is dialled, where the dialler delivers to us.
+ *
+ * On this phone it never does, and the module in SystemUI answers the same broadcast instead -
+ * see `Main.registerSecretCode`, which also records what was measured. This is kept because the
+ * two do not conflict: where the dialler does deliver to an app, this is the shorter path and
+ * works without the module being enabled; where it does not, this simply never fires.
+ *
+ * The manifest filter already restricts the action and the code, so anything that arrives here
+ * is ours.
  */
 class SecretCodeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

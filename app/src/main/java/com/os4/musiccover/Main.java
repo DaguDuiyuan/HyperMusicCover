@@ -1220,6 +1220,54 @@ public class Main extends XposedModule {
         }
     }
 
+    /**
+     * Opens the app when its code is dialled - from in here, where it actually works.
+     *
+     * The app has a manifest receiver for the same broadcast and on this phone it is never
+     * called. Measured rather than assumed: the receiver is registered and resolvable (pm
+     * query-receivers finds it for both actions), an identically-declared receiver in another
+     * installed app does get called for its own code, and ours is not called for any of three
+     * code lengths. Whatever the dialler is filtering on, a third-party app's manifest receiver
+     * does not get there.
+     *
+     * Registering it here sidesteps the whole question twice over. This is SystemUI: a receiver
+     * registered at runtime is not subject to the implicit-broadcast rules that manifest
+     * receivers are, and starting an activity from a system process is not subject to the
+     * background-activity-start rules that made the app's own attempt fail silently even when
+     * it was reached.
+     *
+     * Kept alongside the app's receiver rather than replacing it: the app's works on phones
+     * whose dialler does deliver, and on those this one simply never fires.
+     */
+    private static void registerSecretCode(Context ctx) {
+        try {
+            IntentFilter f = new IntentFilter();
+            f.addAction("android.provider.Telephony.SECRET_CODE");
+            f.addAction("android.telephony.action.SECRET_CODE");
+            f.addDataScheme("android_secret_code");
+            f.addDataAuthority(LauncherIcon.SECRET_CODE, null);
+            ctx.registerReceiver(new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context c, Intent i) {
+                    Xp.log(TAG + "secret code dialled: " + i.getData());
+                    try {
+                        Intent open = new Intent(Intent.ACTION_MAIN);
+                        open.setClassName(BuildConfig.APPLICATION_ID,
+                                "com.os4.musiccover.MainActivity");
+                        open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                        c.startActivity(open);
+                    } catch (Throwable t) {
+                        Xp.log(TAG + "could not open the app: " + t);
+                    }
+                }
+            }, f, Context.RECEIVER_EXPORTED);
+            Xp.log(TAG + "listening for the dialled code " + LauncherIcon.SECRET_CODE);
+        } catch (Throwable t) {
+            Xp.log(TAG + "secret code receiver failed: " + t);
+        }
+    }
+
     static void saveState() {
         if (sAppCtx == null) return;
         // Never while loadState is still walking the file. Some of the setters it applies values
@@ -1852,7 +1900,10 @@ public class Main extends XposedModule {
             }
         };
         ctx.registerReceiver(r, new IntentFilter(ACTION), Context.RECEIVER_EXPORTED);
+        registerSecretCode(ctx);
         Xp.log(TAG + "receiver registered for " + ACTION);
+        // (registerSecretCode is defined below; see the comment there for why the dialled code
+        // is answered from in here rather than by the app's own manifest receiver.)
         // Asks the wallpaper process what it can take, now that there is a receiver for the
         // answer. A build that predates the question never answers, which is the answer.
         try {
