@@ -31,7 +31,7 @@ object LauncherIcon {
     fun setHidden(context: Context, hidden: Boolean) {
         context.packageManager.setComponentEnabledSetting(
             component(context),
-            // ENABLED, not DEFAULT, as InstallerX does: going back to DEFAULT left the alias
+            // ENABLED, not DEFAULT, as InstallerX Revived does: going back to DEFAULT left the alias
             // resolvable but the HyperOS launcher never put the icon back.
             if (hidden) PackageManager.COMPONENT_ENABLED_STATE_DISABLED
             else PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
