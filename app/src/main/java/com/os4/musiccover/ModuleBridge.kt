@@ -87,6 +87,8 @@ object ModuleBridge {
         val lyricsKeepOn: Boolean = false,
         /** Draw the singing words brighter than white on an HDR screen. */
         val lyricsHdr: Boolean = false,
+        /** Draw each line's translation under it. On unless the user turns it off. */
+        val lyricsTrans: Boolean = true,
         /**
          * A session has actually carried its own lyric since SystemUI started.
          *
@@ -220,6 +222,9 @@ object ModuleBridge {
 
     fun setLyricsKeepOn(context: Context, on: Boolean) =
         send(context, "lyrickeep") { putExtra("on", on) }
+
+    fun setLyricsTrans(context: Context, on: Boolean) =
+        send(context, "lyrictrans") { putExtra("on", on) }
 
     fun setFingerprintAvoid(context: Context, mode: Int) =
         send(context, "fpavoid") { putExtra("mode", mode) }
@@ -466,6 +471,8 @@ object ModuleBridge {
             lyrics = b.getBoolean("lyrics", false),
             lyricsKeepOn = b.getBoolean("lyrickeep", false),
             lyricsHdr = b.getBoolean("lyrichdr", false),
+            // Defaults the other way: this one is on for anyone whose module predates the key.
+            lyricsTrans = b.getBoolean("lyrictrans", true),
             sessionLyric = b.getBoolean("sessionlyric", false),
             fpAvoid = b.getInt("fpavoid", 0),
             shade = b.keySet()

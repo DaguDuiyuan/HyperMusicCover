@@ -71,6 +71,15 @@ final class LockLyrics {
      * changes colour too (reported 2026-09-16). Doing it without that needs its own window.
      */
     static volatile boolean sHdr = false;
+    /**
+     * The fourth switch: whether a line's translation is drawn under it.
+     *
+     * On by default, because it is what the lyrics look like when the source has one: off is for
+     * people who read the language and find the second line in the way. It is not a filter on
+     * what is fetched - the layout drops the translation's rows, so the lines close up rather
+     * than leaving a gap where it was.
+     */
+    static volatile boolean sTrans = true;
     /** How far above SDR white the window may go; the text asks for less than this. */
     private static final float HDR_HEADROOM = 4f;
     private static Object sShadeWindow;

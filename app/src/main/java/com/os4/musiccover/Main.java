@@ -1511,6 +1511,10 @@ public class Main extends XposedModule {
                     + "\nlyrics=" + (LockLyrics.sEnabled ? 1 : 0)
                     + "\nlyrickeep=" + (LockLyrics.sKeepOn ? 1 : 0)
                     + "\nlyrichdr=" + (LockLyrics.sHdr ? 1 : 0)
+                    // Written as 1 or 0 like the rest, but read back as the default when absent:
+                    // the key did not exist before this setting did, and the lyrics are supposed
+                    // to look the way they always have on a file that predates it.
+                    + "\nlyrictrans=" + (LockLyrics.sTrans ? 1 : 0)
                     // Not a setting - whether the last lookup got its lyric from the session.
                     // Kept across restarts so the settings page does not accuse a working
                     // provider module of doing nothing merely because nothing has played yet;
@@ -1594,6 +1598,7 @@ public class Main extends XposedModule {
                         else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
                         else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
                         else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
+                        else if ("lyrictrans".equals(k)) LockLyrics.sTrans = "1".equals(v);
                         else if ("sawlyric".equals(k)) {
                             LockLyrics.sSawSessionLyric = "1".equals(v);
                         }
@@ -1798,6 +1803,13 @@ public class Main extends XposedModule {
                     } else if ("lyrichdr".equals(op)) {
                         LockLyrics.sHdr = i.getBooleanExtra("on", !LockLyrics.sHdr);
                         Xp.log(TAG + "lyrics HDR highlight: " + LockLyrics.sHdr);
+                        LockLyrics.refresh();
+                        saveState();
+                    } else if ("lyrictrans".equals(op)) {
+                        LockLyrics.sTrans = i.getBooleanExtra("on", !LockLyrics.sTrans);
+                        Xp.log(TAG + "lyrics translations: " + LockLyrics.sTrans);
+                        // The view notices the switch itself and lays the lines out again around
+                        // it; refresh only has to start the frames that let it.
                         LockLyrics.refresh();
                         saveState();
                     } else if ("lyricinfo".equals(op)) {
@@ -2066,6 +2078,7 @@ public class Main extends XposedModule {
                         out.putBoolean("lyrics", LockLyrics.sEnabled);
                         out.putBoolean("lyrickeep", LockLyrics.sKeepOn);
                         out.putBoolean("lyrichdr", LockLyrics.sHdr);
+                        out.putBoolean("lyrictrans", LockLyrics.sTrans);
                         // Whether anything has actually written a lyric to a session, which is
                         // what tells a working provider module from a merely installed one.
                         out.putBoolean("sessionlyric", LockLyrics.sSawSessionLyric

@@ -140,6 +140,8 @@
     <string name="lyrics_provider_got_it">Got it</string>
     <string name="lyrics_provider_missing">Without it, fetching lyrics may fail.</string>
     <string name="lyrics_provider_idle">In LSPosed, check that the module is enabled and that your player is in its scope, then restart the system UI.</string>
+    <string name="lyrics_trans">Show translations</string>
+    <string name="lyrics_trans_summary">Draw each line\'s translation under it. Turned off, the lines close up rather than leaving a gap</string>
     <string name="lyrics_hdr">HDR highlight (experimental)</string>
     <string name="lyrics_hdr_summary">The glow at the end of a held note goes brighter than white on an HDR screen</string>
     <string name="lyrics_keep_on">Keep the screen on for lyrics</string>

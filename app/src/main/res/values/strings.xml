@@ -140,6 +140,8 @@
     <string name="lyrics_provider_got_it">知道了</string>
     <string name="lyrics_provider_missing">未安装则歌词获取可能不成功</string>
     <string name="lyrics_provider_idle">请在 LSPosed 里确认模块已启用、并在作用域里勾选你用的播放器，然后重启系统界面。</string>
+    <string name="lyrics_trans">显示翻译</string>
+    <string name="lyrics_trans_summary">在每行歌词下面显示翻译。关闭后歌词行会收紧，不会留出空位</string>
     <string name="lyrics_hdr">HDR 高光歌词（实验性功能）</string>
     <string name="lyrics_hdr_summary">长音结尾发光时在 HDR 屏幕上以更高亮度显示</string>
     <string name="lyrics_keep_on">播放歌词时屏幕常亮</string>
