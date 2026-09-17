@@ -76,7 +76,10 @@ fun DonatePageContent(
             DonateChannel(alipay, R.drawable.donate_alipay, "HyperMusicCover-Alipay.jpg", "image/jpeg"),
         )
     }
-    var selected by remember { mutableIntStateOf(0) }
+    // Alipay, not the first tab: it is the one the author is paid through most, and a tab row
+    // whose selection has to be moved before the page is useful is a tab row pointed the wrong
+    // way. The order stays as it is - the tabs are read left to right whichever is selected.
+    var selected by remember { mutableIntStateOf(channels.indexOfFirst { it.name == alipay }) }
     val channel = channels[selected]
 
     // null while nothing has been saved; true/false is the outcome of the last attempt, and it is
@@ -154,12 +157,24 @@ fun DonatePageContent(
                             contentDescription = shown.name,
                         )
                     }
-                    MiuixText(
-                        text = stringResource(R.string.donate_scan_hint),
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center,
-                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        MiuixText(
+                            text = stringResource(R.string.donate_scan_hint),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        // The way out of the same-screen problem the line above describes, for
+                        // the phones that have it: the assistant reads the code off the screen
+                        // it is being shown on.
+                        MiuixText(
+                            text = stringResource(R.string.donate_xiaoai_tip),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
                     TextButton(
                         modifier = Modifier.fillMaxWidth(),
                         text = when (saveResult) {
