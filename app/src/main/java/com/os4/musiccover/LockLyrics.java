@@ -1,5 +1,6 @@
 package com.os4.musiccover;
 
+import android.content.Intent;
 import android.media.session.MediaController;
 import android.media.session.PlaybackState;
 import android.os.SystemClock;
@@ -89,16 +90,44 @@ final class LockLyrics {
      */
     private static int sSource = LyricSource.SRC_NONE;
     /**
-     * What the wallpaper process was last told about the blur. Null = unknown.
+     * What the wallpaper process was last told about the blur, and when that answer was made.
+     * 0 = nothing decided yet, which is what makes the first one always go.
      *
      * Volatile because every cover push reads it off the push thread: a track change carries the
      * answer with it, which is what settles a switch the other process missed.
+     *
+     * The answer and its time are one long - bit 0 the answer, the rest the uptime it was decided
+     * at - because they are read as a pair by a push that is built on another thread. As two
+     * fields a decision landing between the reads would send one answer with another's time, and
+     * the time is what the wallpaper process uses to drop an answer older than the one in hand.
      */
-    private static volatile Boolean sBlurSent;
+    private static volatile long sBlurSent;
 
     /** Whether the cover should be frosted right now, for a push to carry over. */
     static boolean blurWanted() {
-        return Boolean.TRUE.equals(sBlurSent);
+        return (sBlurSent & 1L) != 0L;
+    }
+
+    /**
+     * Puts this process's answer, and when it was made, on a cover push.
+     *
+     * The push is built on the worker while the answer is decided on the main thread, so the
+     * answer a push reads can be one a tap has already replaced - and the push, being the slow
+     * half, arrives after the switch that replaced it. Without the time on it the wallpaper
+     * process has no way to tell which of the two is the newer answer and takes the last one to
+     * arrive: the cover comes in sharp under its lyrics and stays that way for the song, because
+     * both sides believe they agree. See WallpaperProbe.takeBlurDecision.
+     */
+    static void putBlurOn(Intent out) {
+        long state = sBlurSent;      // one read: the answer and its time travel together
+        out.putExtra("lyricblur", (state & 1L) != 0L);
+        out.putExtra("blurseq", state >>> 1);
+    }
+
+    /** Writes an answer down, timed on the clock both processes share, and answers with it. */
+    private static long setBlurSent(boolean on) {
+        sBlurSent = SystemClock.uptimeMillis() << 1 | (on ? 1L : 0L);
+        return sBlurSent;
     }
 
     private static boolean sDemo;
@@ -496,6 +525,10 @@ final class LockLyrics {
                 + " sessionHasLyric=" + LyricSource.hasLyricInfo(sController)
                 + " pos=" + positionMs() + " playing=" + playing()
                 + " cover=" + Main.coverModeOn() + " screen=" + Main.screenOnCached()
+                // What the wallpaper process was last told, and when: the other side prints the
+                // answer it holds and when it was decided, so the two readings side by side say
+                // whether a switch was lost on the way rather than guessing at the cover.
+                + " blur=" + (blurWanted() ? "on" : "off") + "@" + (sBlurSent >>> 1)
                 + " phase=" + ClockCollapse.phase() + " cardP=" + Main.cardProgress()
                 + " container=" + (c == null ? "none" : c.getAlpha() + "/shown=" + c.isShown())
                 + " card=" + (card == null ? "none" : "shown=" + card.isShown())
@@ -504,10 +537,16 @@ final class LockLyrics {
                 + " view={" + (v == null ? "none" : v.describe()) + "}";
     }
 
-    /** The wallpaper process restarted, or may have: tell it again. */
+    /**
+     * The wallpaper process restarted, or may have: tell it again.
+     *
+     * Told again rather than forgotten: the answer is still the answer, and this only skips the
+     * "already sent that" short circuit below. What it must not do is make the answer look older
+     * than the last one it gave - the other side drops those - so the clock it is timed on runs
+     * on from here like any other decision.
+     */
     static void resendBlur() {
-        sBlurSent = null;
-        updateBlur();
+        updateBlur(true);
     }
 
     /**
@@ -515,19 +554,26 @@ final class LockLyrics {
      *
      * Held through a track change's lookup rather than dropped and re-applied, which would pulse
      * the cover sharp and back on every song. Nothing is sent while cover mode is off: leaving
-     * it fades the cover out whole, and the wallpaper process clears the blur with it.
+     * it fades the cover out whole, and the wallpaper process clears the blur with it. The
+     * decision itself is written down either way, because a cover push carries it.
      */
     private static void updateBlur() {
+        updateBlur(false);
+    }
+
+    /** again = tell the other side even when the answer has not changed. */
+    private static void updateBlur(boolean again) {
         if (!Main.coverModeOn()) {
-            sBlurSent = Boolean.FALSE;
+            setBlurSent(false);
             return;
         }
         boolean on = wanted();
-        boolean want = on && (!sLines.isEmpty() || (sLoading && Boolean.TRUE.equals(sBlurSent)));
-        if (sBlurSent != null && sBlurSent == want) return;
-        sBlurSent = want;
-        Main.sendToWallpaper("lyricblur", want);
-        Xp.log(TAG + "cover blur " + (want ? "on" : "off"));
+        boolean want = on && (!sLines.isEmpty() || (sLoading && blurWanted()));
+        long cur = sBlurSent;
+        if (!again && cur != 0L && ((cur & 1L) != 0L) == want) return;
+        long state = setBlurSent(want);
+        Main.sendToWallpaper("lyricblur", want, state >>> 1);
+        Xp.log(TAG + "cover blur " + (want ? "on" : "off") + (again ? " (told again)" : ""));
     }
 
     // ------------------------------------------------------------------ internals

@@ -5025,7 +5025,14 @@ public class Main extends XposedModule {
         // overtaken on the other side - and nothing else ever corrected it, so a song could play
         // out sharp under its lyrics. This makes every track change an agreement between the two
         // processes, and it also saves the new cover fading in sharp and frosting a beat later.
-        out.putExtra("lyricblur", LockLyrics.blurWanted());
+        //
+        // It carries when the answer was decided as well, because this push is built on the
+        // worker while the answer is decided on the main thread: a tap out of cover mode and
+        // quickly back in has this push holding the answer from before the tap, and - being the
+        // slow half, composed before it is sent - it reaches the wallpaper after the lyric switch
+        // has said the opposite. The time is what lets that side drop the older of the two
+        // instead of taking whichever arrived last. See LockLyrics.putBlurOn.
+        LockLyrics.putBlurOn(out);
         // This side's half of the timeline, for `op timing` over there. See sCtTrack.
         out.putExtra("t0", sCtTrack);
         out.putExtra("tskip", sSkipAt);
@@ -5400,10 +5407,22 @@ public class Main extends XposedModule {
 
     /** One switch to the wallpaper process, for callers outside this file. */
     static void sendToWallpaper(String op, boolean on) {
+        sendToWallpaper(op, on, 0L);
+    }
+
+    /**
+     * The same, with the time the switch was decided at.
+     *
+     * For an answer that can also travel on a cover push: the push is built on the worker and
+     * this is sent from the main thread, so the two can cross, and the one that arrives last is
+     * not the one that was decided last. 0 = no time, for a switch that is not one of those.
+     */
+    static void sendToWallpaper(String op, boolean on, long decidedAt) {
         Context c = sAppCtx;
         if (c == null) return;
         Intent out = wallpaperIntent(op);
         out.putExtra("on", on);
+        if (decidedAt > 0L) out.putExtra("blurseq", decidedAt);
         c.sendBroadcast(out);
     }
 
