@@ -2259,13 +2259,25 @@ public class WallpaperProbe {
         if (eng != null && !frameRequest(eng, keepAlive)) reportNoFrameRequest(eng);
     }
 
+    /**
+     * Whether an entry's boolean is the one that DEFERS the post-render teardown, read off that
+     * build's own bytecode and never guessed.
+     *
+     * Index-aligned with FRAME_REQUESTS. True only where the dex has been read: T and U hand
+     * their argument to the post-render step, where false runs finishRendering() on the spot -
+     * the EGL surface and context destroyed after the frame - and true defers it by a second.
+     * Z's boolean is a different question entirely (whether preRender re-reads the texture), and
+     * the T(Z,I) entry is a shape nobody has met yet, so neither of those is ever given ours.
+     */
+    private static final boolean[] FRAME_REQ_DEFERS_TEARDOWN = {true, true, false, false};
+
     /** Tries the known frame requests, the one that answered last time first. */
     private static boolean frameRequest(Object eng, boolean keepAlive) {
         int known = sFrameReq;
-        if (known >= 0 && callFrameRequest(eng, FRAME_REQUESTS[known], keepAlive)) return true;
+        if (known >= 0 && callFrameRequest(eng, known, keepAlive)) return true;
         for (int i = 0; i < FRAME_REQUESTS.length; i++) {
             if (i == known) continue;
-            if (callFrameRequest(eng, FRAME_REQUESTS[i], keepAlive)) {
+            if (callFrameRequest(eng, i, keepAlive)) {
                 sFrameReq = i;
                 return true;
             }
@@ -2273,13 +2285,14 @@ public class WallpaperProbe {
         return false;
     }
 
-    private static boolean callFrameRequest(Object eng, Object[] req, boolean keepAlive) {
+    private static boolean callFrameRequest(Object eng, int entry, boolean keepAlive) {
+        Object[] req = FRAME_REQUESTS[entry];
         Object[] args = new Object[req.length - 1];
         System.arraycopy(req, 1, args, 0, args.length);
-        // The argument is the OEM's, not ours. It used to be overwritten with keepAlive - a flag
-        // that means "this is a fade's own frame, do not log it" on this side and nothing at all
-        // on theirs - which sent `true` where FRAME_REQUESTS deliberately says FALSE, the
-        // no-animation value at every one of these entry points.
+        // The argument is the OEM's, not ours, everywhere its meaning has not been read out of
+        // that build's bytecode. It used to be overwritten with keepAlive unconditionally, which
+        // sent `true` where FRAME_REQUESTS deliberately says FALSE, the no-animation value at
+        // every one of these entry points.
         //
         // On 7.0.7 that went unnoticed: the frame request there is U(Z), which reaches preRender
         // either way. On 8.0.8-flip the frame request is Z(Z), which posts preRender - V(Z),
@@ -2288,6 +2301,18 @@ public class WallpaperProbe {
         // `gpu fade timed out after 226 frames (armed=false)`, about 1.9s of the cover sitting
         // in the wallpaper process without being drawn, which is what read on the phone as the
         // cover taking seconds to appear and needing a fold or a rotation to show up.
+        //
+        // Where the boolean IS the teardown flag, though, ours is the right value and sending
+        // the OEM's costs the whole animation: a run of frames asked for with false destroys the
+        // EGL context after every one of them, and the next frame is a new context, which the
+        // engine treats as a new surface and re-uploads everything for. That is a fade at 9-17
+        // frames where the same fade with true draws 44-46 - the difference between a crossfade
+        // and a slideshow, and what made the frost going on for the lyrics stutter.
+        if (keepAlive && entry < FRAME_REQ_DEFERS_TEARDOWN.length
+                && FRAME_REQ_DEFERS_TEARDOWN[entry]
+                && args.length > 0 && args[0] instanceof Boolean) {
+            args[0] = Boolean.TRUE;
+        }
         try {
             Xp.callMethod(eng, (String) req[0], args);
             return true;
