@@ -513,6 +513,33 @@ public class Main extends XposedModule {
     /** How small the thumbnail gets at the far end of the fade. Apple's shrinks as it goes. */
     private static final float CARD_ART_MIN_SCALE = 0.82f;
     /**
+     * The lyrics exception as a number the card can move on, rather than a yes/no read off the
+     * frame it happens to land on. 1 is "the thumbnail the setting hides is back because the
+     * lyrics are up", 0 is "the card as the OEM draws it".
+     *
+     * Two reported bugs, one cause (2026-09-17). Read every frame with no progress of its own,
+     * the answer flipped mid-transition, and both flips are visible: leaving cover mode with the
+     * lyrics up put the thumbnail back for the first frames of the exit and took it away again
+     * for the rest of it - "从歌词界面到正常封面切换的时候缩略图会闪一下" - and the title it
+     * carries jumped between left and centre instead of sliding, which is the same number.
+     *
+     * Not a second animator. It is the same spring the cover itself moves on - EASE_COVER at the
+     * response the user set - stepped from the card's own per-frame pass (see stepLyricArt), so
+     * the thumbnail and the title cross at the speed of the transition they are part of and there
+     * is still exactly one curve on this lock screen.
+     */
+    private static volatile float sLyricArtP;
+    private static float sLyricArtV;
+    private static float sLyricArtTo = -1f;
+    private static long sLyricArtAt;
+    private static boolean sCardFramePosted;
+    /**
+     * Whether the lyrics are up, remembered so the exit of cover mode does not re-ask it. The
+     * lyric view fades out with the card's own progress, so during the exit the lyrics are still
+     * on screen while they fade, and asking then is what made the thumbnail blink.
+     */
+    private static boolean sLyricUp;
+    /**
      * The artwork's scale as the OEM has it, and the last one we wrote over it.
      *
      * Sampling one frame of this and writing it back mirrored people's thumbnails. `album_art`
@@ -6349,6 +6376,16 @@ public class Main extends XposedModule {
         // the clock's own frames instead of blinking away before the clock has begun to move.
         // Without an animation there is nothing to fade, and the settled look goes on directly.
         sCardP = animate ? 0f : 1f;
+        // The lyrics exception is decided here, before anything has moved. With the lyrics up
+        // the thumbnail the setting hides never leaves, so the morph has nothing to fade it back
+        // from; sprung from wherever it was, it would dip out and return over the entry, which is
+        // the same blink with the direction reversed. wantsAttached() rather than wantsShown()
+        // because nothing is on screen yet - it answers "will the lyrics be up", which is the
+        // question this state is about.
+        sLyricUp = sMcArtInLyrics && LockLyrics.wantsAttached();
+        sLyricArtP = sLyricArtTo = sLyricUp ? 1f : 0f;
+        sLyricArtV = 0f;
+        sLyricArtAt = 0L;
         applyMediaCard();
         // The response is the slider's, read when the transition starts and nowhere else, which
         // is what makes a change land on the next transition and never mid-flight.
@@ -6907,22 +6944,33 @@ public class Main extends XposedModule {
                 : sCardForced ? (sCoverMode ? 1f : 0f)
                 : sCardP;
         // The exception: with the lyrics up, the thumbnail the setting hides comes back.
-        // Asked every frame rather than latched, because the lyrics come and go on their own -
-        // a track without any - and the thumbnail has to follow.
         //
-        // The screen going off is not one of those comings and goings, which is why the test is
-        // not wantsShown() alone. That answers "is the lyric view on screen right now", and it
-        // says no the moment the screen does off - so the always-on display, which keeps drawing
-        // this card, lost the thumbnail every time the screen went dark. With the screen off the
-        // question is the standing one instead: are the lyrics what this lock screen is showing.
-        boolean lyricsUp = LockLyrics.wantsShown()
-                || (!screenOnCached() && LockLyrics.wantsAttached());
-        boolean hideArt = sMcHideArt && !(sMcArtInLyrics && lyricsUp);
-        float hideP = hideArt ? p : 0f;
-        // Centring is not a setting of its own any more: a title with no thumbnail beside
-        // it belongs in the middle, and a title that has one does not. So it follows the same
-        // number the thumbnail does, which also means the lyrics exception above moves both at
-        // once - the thumbnail comes back and the title steps aside for it in the same frame.
+        // Held across the exit of cover mode rather than asked there. The lyric view fades out on
+        // the card's own progress, so on the way out the lyrics are still on screen while they
+        // fade - but the phase has already left ON, and wantsShown() answers "is it on screen
+        // right now", so it said no on the exit's first frame. hideP went to 1 with p still at 1:
+        // the thumbnail vanished and the title snapped to the centre, and then the falling p
+        // brought both back over the rest of the exit. That is the blink. The answer is held for
+        // the exit and re-asked once the clock has landed, where it cannot be seen.
+        boolean flying = ClockCollapse.phase() == ClockCollapse.Phase.EXIT;
+        if (!flying) {
+            // The screen going off is not one of the lyrics' comings and goings, which is why the
+            // test is not wantsShown() alone. That answers "is the lyric view on screen now", and
+            // it says no the moment the screen does off - so the always-on display, which keeps
+            // drawing this card, lost the thumbnail every time the screen went dark. With the
+            // screen off, or in the AOD a wake has not left yet, the question is the standing one
+            // instead: are the lyrics what this lock screen is showing.
+            sLyricUp = LockLyrics.wantsShown()
+                    || ((ClockCollapse.phase() == ClockCollapse.Phase.AOD || !screenOnCached())
+                        && LockLyrics.wantsAttached());
+        }
+        float exc = stepLyricArt(sMcArtInLyrics && sLyricUp);
+        // One number, on purpose. Centring is not a setting of its own any more - a title with no
+        // thumbnail beside it belongs in the middle and a title that has one does not - so the
+        // title follows the same value the thumbnail does, and both now ride the exception's
+        // progress instead of stepping to it: the thumbnail comes back and the title slides
+        // aside for it, at the speed of the transition they are part of.
+        float hideP = sMcHideArt ? p * (1f - exc) : 0f;
         float centreP = hideP;
         View art = sCardArt;
         if (art != null) {
@@ -6952,6 +7000,95 @@ public class Main extends XposedModule {
         centreCardText(card, (TextView) sCardArtist, centreP);
         applyTitleTap((TextView) sCardTitle, sMcTitleTap && sCoverMode && onKeyguard);
         if (onKeyguard && !sCardForced) sampleCardRect(card, p);
+    }
+
+    /**
+     * One step of the lyrics exception, and what it is now.
+     *
+     * Stepped, not switched: the two answers are two looks of the card, and moving between them
+     * is the same transition the cover itself moves on. Same spring constants as the clock's
+     * (EASE_COVER, at the response the user set for the transition), same integration, so the
+     * thumbnail and the title cross at the speed of the morph they belong to. Anything faster
+     * reads as the cut this replaces; anything slower stops matching the clock beside it.
+     *
+     * The frames come from the card's own pass - the guard already runs every frame of a
+     * transition, and the lyrics being up means the lyric view is redrawing on those same
+     * frames. Only the first step after a change has to be asked for (kickCardFrame): that step
+     * writes nothing new, so nothing would invalidate and the spring would sit at rest one frame
+     * short of moving.
+     *
+     * Snapped rather than sprung on the way into cover mode - see enterCoverMode - because a
+     * thumbnail fading out and back in over the entry would be the same blink, moved.
+     */
+    private static float stepLyricArt(boolean want) {
+        float to = want ? 1f : 0f;
+        // A capture is the app asking what the settled card looks like (see shootCard), and the
+        // frame it lands on is not a thing to keep. Everywhere else the motion IS the state.
+        if (sCardForced) {
+            sLyricArtP = sLyricArtTo = to;
+            sLyricArtV = 0f;
+            sLyricArtAt = 0L;
+            return sLyricArtP;
+        }
+        if (to != sLyricArtTo) {
+            // Retargeted. The spring starts on the next frame: this one has nothing new to write.
+            sLyricArtTo = to;
+            sLyricArtAt = 0L;
+            kickCardFrame();
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (sLyricArtAt == 0L) {
+            sLyricArtAt = now;
+        } else {
+            // A frame that stalled must not be integrated whole, or the thumbnail jumps by
+            // whatever the stall was, in one step, on the very transition this is smoothing.
+            float dt = Math.min(0.05f, (now - sLyricArtAt) / 1000f);
+            sLyricArtAt = now;
+            if (dt > 0f) {
+                final float zeta = EASE_COVER[0];
+                final float w0 = (float) (2 * Math.PI / sClockResponse);
+                final float k = w0 * w0, damp = 2f * zeta * w0;
+                // Sub-stepped: a spring integrated at 60Hz with a response this short is not
+                // stable, and the clock's own loop substeps for the same reason.
+                int steps = Math.max(1, (int) Math.ceil(dt * 240f));
+                float h = dt / steps;
+                for (int i = 0; i < steps; i++) {
+                    float a = -k * (sLyricArtP - to) - damp * sLyricArtV;
+                    sLyricArtV += a * h;
+                    sLyricArtP += sLyricArtV * h;
+                }
+                if (sLyricArtP < 0f) sLyricArtP = 0f;
+                if (sLyricArtP > 1f) sLyricArtP = 1f;
+                // Both ends are exact: hideP is p at 0 and 0 at 1, which are the two states the
+                // card has always had, and an alpha left at 0.998 of one of them is not.
+                if (Math.abs(sLyricArtP - to) < 0.002f && Math.abs(sLyricArtV) < 0.02f) {
+                    sLyricArtP = to;
+                    sLyricArtV = 0f;
+                }
+            }
+        }
+        return sLyricArtP;
+    }
+
+    /**
+     * Asks for one frame of the card's pass.
+     *
+     * A retarget writes the same values it wrote a frame ago, so it invalidates nothing and the
+     * frame that would move the spring never arrives. One posted frame is enough to start it:
+     * from there every step writes a different alpha, scale and translationX, and those are what
+     * carry the next frame.
+     */
+    private static void kickCardFrame() {
+        final View card = sCardGuarded;
+        if (card == null || sCardFramePosted) return;
+        sCardFramePosted = true;
+        card.postOnAnimation(new Runnable() {
+            @Override
+            public void run() {
+                sCardFramePosted = false;
+                if (sCardGuarded == card) assertMediaCard(card);
+            }
+        });
     }
 
     /**
@@ -7373,6 +7510,10 @@ public class Main extends XposedModule {
         ViewTreeObserver.OnPreDrawListener g = sCardGuard;
         sCardGuarded = null;
         sCardGuard = null;
+        // A frame asked for by kickCardFrame() may still be on its way, and it will find nothing
+        // to assert into. Cleared here so the next cover, whose guard is a different card view,
+        // is not told a frame is already posted when there is none.
+        sCardFramePosted = false;
         // The guard is what gives the title back, so it has to happen here: with the guard gone
         // nothing would ever run the assert that would have done it, and the shade would keep a
         // title that pauses the music.
