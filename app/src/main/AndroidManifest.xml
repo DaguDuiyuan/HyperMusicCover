@@ -116,6 +116,13 @@
             android:label="@string/features_shade_title"
             android:theme="@style/Theme.HyperMusicCover" />
 
+        <!-- The payment codes, opened from the home page's donate card. -->
+        <activity
+            android:name=".DonateActivity"
+            android:exported="false"
+            android:label="@string/donate_title"
+            android:theme="@style/Theme.HyperMusicCover" />
+
         <!--
             The module declares itself through META-INF/xposed/ now (java_init.list, module.prop,
             scope.list), which is how API 102 does it. These stay so a manager still lists the app

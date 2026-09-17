@@ -98,6 +98,16 @@
     <string name="home_module_version">模块版本</string>
     <string name="home_unknown">未知</string>
     <string name="home_loading">加载中…</string>
+    <string name="donate_title">捐赠支持</string>
+    <string name="donate_home_summary">模块免费，请作者喝杯咖啡</string>
+    <string name="donate_thanks_title">感谢你的支持</string>
+    <string name="donate_thanks_summary">HyperMusicCover 一直免费且开源。如果它让你的锁屏好看了一点，随意打赏一点就够了，多少都是鼓励。</string>
+    <string name="donate_wechat">微信</string>
+    <string name="donate_alipay">支付宝</string>
+    <string name="donate_scan_hint">用另一台手机扫码，或保存到相册后在支付 App 里从相册识别</string>
+    <string name="donate_save">保存到相册</string>
+    <string name="donate_saved">已保存到相册</string>
+    <string name="donate_save_failed">保存失败</string>
     <string name="card_section">媒体卡片</string>
     <string name="card_hide_art">隐藏封面缩略图</string>
     <string name="card_center_text">标题居中</string>

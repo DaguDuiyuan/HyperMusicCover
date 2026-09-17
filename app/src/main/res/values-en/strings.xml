@@ -98,6 +98,16 @@
     <string name="home_module_version">Module version</string>
     <string name="home_unknown">Unknown</string>
     <string name="home_loading">Loading…</string>
+    <string name="donate_title">Donate</string>
+    <string name="donate_home_summary">The module is free — buy the author a coffee</string>
+    <string name="donate_thanks_title">Thank you for your support</string>
+    <string name="donate_thanks_summary">HyperMusicCover is free and open source. If it made your lock screen a little nicer, anything at all is encouragement.</string>
+    <string name="donate_wechat">WeChat</string>
+    <string name="donate_alipay">Alipay</string>
+    <string name="donate_scan_hint">Scan with another phone, or save the code and pick it from your album in the payment app</string>
+    <string name="donate_save">Save to album</string>
+    <string name="donate_saved">Saved to album</string>
+    <string name="donate_save_failed">Could not save</string>
     <string name="card_section">Media card</string>
     <string name="card_hide_art">Hide the thumbnail</string>
     <string name="card_center_text">Centre the title</string>
