@@ -264,39 +264,6 @@ fun HomePageView(
             }
         }
 
-        // Between the status card and the device list, which is where KernelSU puts its own
-        // donate row: below the one thing the page exists to answer, and above the block nobody
-        // opens the app to read. It is a row rather than a button because everything else the
-        // user can tap in this app is a row, and a lone button here would read as a demand.
-        item {
-            Card(
-                modifier = Modifier
-                    .padding(horizontal = 12.dp)
-                    .padding(top = 12.dp)
-            ) {
-                ArrowPreference(
-                    title = stringResource(R.string.donate_title),
-                    summary = stringResource(R.string.donate_home_summary),
-                    startAction = {
-                        Icon(
-                            modifier = Modifier
-                                .padding(end = 12.dp)
-                                .size(28.dp),
-                            imageVector = Icons.Rounded.Favorite,
-                            // Fixed rather than themed: the heart is the whole signal here, and
-                            // in the dynamic-colour scheme it would otherwise take whatever
-                            // colour the wallpaper happened to give it.
-                            tint = Color(0xFFF2545B),
-                            contentDescription = null,
-                        )
-                    },
-                    onClick = {
-                        context.startActivity(Intent(context, DonateActivity::class.java))
-                    },
-                )
-            }
-        }
-
         item {
             SmallTitle(
                 text = stringResource(R.string.home_device_info),
@@ -329,6 +296,40 @@ fun HomePageView(
                         summary = moduleVersion,
                     )
                 }
+            }
+        }
+
+        // Last on the page, under the device list. Asking comes after everything the page was
+        // opened for, never before it. It is a row rather than a button because everything else
+        // the user can tap in this app is a row, and a lone button here would read as a demand.
+        //
+        // No top padding of its own: the device card above already carries 12dp underneath it.
+        item {
+            Card(
+                modifier = Modifier
+                    .padding(horizontal = 12.dp)
+                    .padding(bottom = 12.dp)
+            ) {
+                ArrowPreference(
+                    title = stringResource(R.string.donate_title),
+                    summary = stringResource(R.string.donate_home_summary),
+                    startAction = {
+                        Icon(
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .size(28.dp),
+                            imageVector = Icons.Rounded.Favorite,
+                            // Fixed rather than themed: the heart is the whole signal here, and
+                            // in the dynamic-colour scheme it would otherwise take whatever
+                            // colour the wallpaper happened to give it.
+                            tint = Color(0xFFF2545B),
+                            contentDescription = null,
+                        )
+                    },
+                    onClick = {
+                        context.startActivity(Intent(context, DonateActivity::class.java))
+                    },
+                )
             }
         }
     }
