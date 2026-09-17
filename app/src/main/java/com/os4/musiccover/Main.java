@@ -433,7 +433,13 @@ public class Main extends XposedModule {
      * thumbnail is showing it a second time.
      */
     private static volatile boolean sMcHideArt;
-    private static volatile boolean sMcCenterText;
+    /**
+     * Whether the hidden thumbnail comes back while the lock screen lyrics are up.
+     *
+     * Only means anything with sMcHideArt on, which is what the app's layout says: it is the
+     * exception to that setting, not a setting of its own.
+     */
+    private static volatile boolean sMcArtInLyrics;
     /**
      * Whether tapping the card's title line toggles playback.
      *
@@ -664,10 +670,27 @@ public class Main extends XposedModule {
             WallpaperProbe.handle(param);
             return;
         }
+        // The lock screen editor and the always-on display, which judge a wallpaper's depth with
+        // their own copies of the same classes and hold the ceiling on saved lock screens.
+        if ("com.miui.aod".equals(pkg)) {
+            HyperTweaks.aod(param.getDefaultClassLoader());
+            return;
+        }
+        // The control centre plugin. Usually loaded into SystemUI's own loader, in which case
+        // this never fires and the attempt below is the one that lands.
+        if ("miui.systemui.plugin".equals(pkg)) {
+            HyperTweaks.plugin(param.getDefaultClassLoader());
+            return;
+        }
         if (!"com.android.systemui".equals(pkg)) return;
 
         final ClassLoader cl = param.getDefaultClassLoader();
         Xp.log(TAG + "loaded into SystemUI");
+
+        // Before the clock container lookup below, which returns early when it fails: none of
+        // these have anything to do with the clock, and a build that renamed the container must
+        // not cost them too.
+        HyperTweaks.systemUi(cl);
 
         try {
             sContainerCls = Xp.findClass(CLS_CONTAINER, cl);
@@ -1396,12 +1419,13 @@ public class Main extends XposedModule {
                     + "\nglass=" + sGlassEnd
                     + "\nspring=" + sClockResponse
                     + "\nmcart=" + (sMcHideArt ? 1 : 0)
-                    + "\nmctext=" + (sMcCenterText ? 1 : 0)
+                    + "\nmclyricart=" + (sMcArtInLyrics ? 1 : 0)
                     + "\nmctap=" + (sMcTitleTap ? 1 : 0)
                     + "\ntap=" + (sTapToggle ? 1 : 0)
                     + ShadeLayer.dumpCfg()
                     + "\nfadewp=" + (sFadeWp ? 1 : 0)
                     + "\nhidefp=" + (sHideFp ? 1 : 0)
+                    + "\ncolon=" + (HyperTweaks.sForceColon ? 1 : 0)
                     + "\nlyrics=" + (LockLyrics.sEnabled ? 1 : 0)
                     + "\nlyrickeep=" + (LockLyrics.sKeepOn ? 1 : 0)
                     + "\nlyrichdr=" + (LockLyrics.sHdr ? 1 : 0)
@@ -1479,11 +1503,12 @@ public class Main extends XposedModule {
                         // wallpaper process are both part of reading the value back.
                         else if ("spring".equals(k)) setClockResponse(Float.parseFloat(v));
                         else if ("mcart".equals(k)) sMcHideArt = "1".equals(v);
-                        else if ("mctext".equals(k)) sMcCenterText = "1".equals(v);
+                        else if ("mclyricart".equals(k)) sMcArtInLyrics = "1".equals(v);
                         else if ("mctap".equals(k)) sMcTitleTap = "1".equals(v);
                         else if ("tap".equals(k)) sTapToggle = "1".equals(v);
                         else if ("fadewp".equals(k)) sFadeWp = "1".equals(v);
                         else if ("hidefp".equals(k)) sHideFp = "1".equals(v);
+                        else if ("colon".equals(k)) HyperTweaks.sForceColon = "1".equals(v);
                         else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
                         else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
                         else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
@@ -1661,15 +1686,15 @@ public class Main extends XposedModule {
                         }
                     } else if ("mediacard".equals(op)) {
                         if (i.hasExtra("hideart")) sMcHideArt = i.getBooleanExtra("hideart", false);
-                        if (i.hasExtra("centertext")) {
-                            sMcCenterText = i.getBooleanExtra("centertext", false);
+                        if (i.hasExtra("lyricart")) {
+                            sMcArtInLyrics = i.getBooleanExtra("lyricart", false);
                         }
                         if (i.hasExtra("titletap")) {
                             sMcTitleTap = i.getBooleanExtra("titletap", false);
                         }
                         saveState();
                         Xp.log(TAG + "media card hideArt=" + sMcHideArt
-                                + " centerText=" + sMcCenterText
+                                + " artInLyrics=" + sMcArtInLyrics
                                 + " titleTap=" + sMcTitleTap);
                         applyMediaCard();
                     } else if ("texfit".equals(op)) {
@@ -1785,6 +1810,23 @@ public class Main extends XposedModule {
                             }
                         }, "MCNcmProbe").start();
                         setResultData("searching -> " + out.getAbsolutePath());
+                    } else if ("tweaks".equals(op)) {
+                        // Which of the HyperOS restrictions actually came off in this process.
+                        // Over the probe rather than the log because the module's INFO lines are
+                        // not readable on this device - LSPosed keeps error level only.
+                        setResultData(HyperTweaks.describe());
+                    } else if ("colon".equals(op)) {
+                        HyperTweaks.sForceColon = i.getBooleanExtra("on",
+                                !HyperTweaks.sForceColon);
+                        saveState();
+                        // The always-on display draws its own clock in its own process, which
+                        // can read neither this flag nor the file it is saved in, so the switch
+                        // is mirrored somewhere both can see.
+                        HyperTweaks.publishColon(sAppCtx);
+                        // Nothing to re-apply: the clock asks its bean whether to draw the colon
+                        // on the next layout, which the keyguard does every time it comes up.
+                        Xp.log(TAG + "force clock colon "
+                                + (HyperTweaks.sForceColon ? "on" : "off"));
                     } else if ("hidefp".equals(op)) {
                         sHideFp = i.getBooleanExtra("on", !sHideFp);
                         saveState();
@@ -1930,11 +1972,12 @@ public class Main extends XposedModule {
                         MediaController mc = sWatched;
                         out.putString("player", mc == null ? "" : mc.getPackageName());
                         out.putBoolean("mcart", sMcHideArt);
-                        out.putBoolean("mctext", sMcCenterText);
+                        out.putBoolean("mclyricart", sMcArtInLyrics);
                         out.putBoolean("mctap", sMcTitleTap);
                         out.putBoolean("tap", sTapToggle);
                         out.putBoolean("fadewp", sFadeWp);
                         out.putBoolean("hidefp", sHideFp);
+                        out.putBoolean("colon", HyperTweaks.sForceColon);
                         out.putBoolean("lyrics", LockLyrics.sEnabled);
                         out.putBoolean("lyrickeep", LockLyrics.sKeepOn);
                         out.putBoolean("lyrichdr", LockLyrics.sHdr);
@@ -1997,7 +2040,6 @@ public class Main extends XposedModule {
                                 + " track=" + sTrackKey);
                         Xp.log(TAG + "card rect: " + sCardL + "," + sCardT + " "
                                 + sCardW + "x" + sCardH + " hideArt=" + sMcHideArt
-                                + " centerText=" + sMcCenterText
                                 + " titleTap=" + sMcTitleTap
                                 + " title=" + (sCardTitleTapped != null) + " cardP=" + sCardP);
                         Xp.log(TAG + "tap: toggle=" + sTapToggle
@@ -2029,6 +2071,10 @@ public class Main extends XposedModule {
             Xp.log(TAG + "hello to the wallpaper process failed: " + t);
         }
         loadState();
+        // Again at startup, not only when the switch is touched: the flag the always-on display
+        // reads is written by this process, and a phone that was rebooted with the switch on has
+        // nothing in it otherwise.
+        HyperTweaks.publishColon(ctx);
         // The icon views can already exist by now - the file is read when the keyguard attaches,
         // which is not necessarily before the fingerprint view is built.
         applyHideFp();
@@ -4434,8 +4480,7 @@ public class Main extends XposedModule {
                 .append(" rect=").append(sCardL).append(',').append(sCardT).append(' ')
                 .append(sCardW).append('x').append(sCardH)
                 .append(" artslot=").append(out.containsKey("artfrac") ? "yes" : "no")
-                .append(" hideArt=").append(sMcHideArt)
-                .append(" centerText=").append(sMcCenterText);
+                .append(" hideArt=").append(sMcHideArt);
         }
 
         putDate(out, dump);
@@ -6812,7 +6857,7 @@ public class Main extends XposedModule {
                     // Only worth waiting for while something still wants something from the
                     // card: the restyle on the way in, or the artwork tap that is the way back.
                     if (attempt < CARD_RETRIES
-                            && ((sCoverMode && (sMcHideArt || sMcCenterText || sMcTitleTap))
+                            && ((sCoverMode && (sMcHideArt || sMcTitleTap))
                                 || wantsArtTap())) {
                         main().postDelayed(new Runnable() {
                             @Override
@@ -6836,7 +6881,7 @@ public class Main extends XposedModule {
                 sCardArtist = card.findViewById(card.getResources()
                         .getIdentifier("header_artist", "id", "com.android.systemui"));
                 assertMediaCard(card);
-                if (sCoverMode && (sMcHideArt || sMcCenterText || sMcTitleTap)) guardCard(card);
+                if (sCoverMode && (sMcHideArt || sMcTitleTap)) guardCard(card);
                 else releaseCardGuard();
             }
         });
@@ -6861,8 +6906,24 @@ public class Main extends XposedModule {
         float p = !onKeyguard ? 0f
                 : sCardForced ? (sCoverMode ? 1f : 0f)
                 : sCardP;
-        float hideP = sMcHideArt ? p : 0f;
-        float centreP = sMcCenterText ? p : 0f;
+        // The exception: with the lyrics up, the thumbnail the setting hides comes back.
+        // Asked every frame rather than latched, because the lyrics come and go on their own -
+        // a track without any - and the thumbnail has to follow.
+        //
+        // The screen going off is not one of those comings and goings, which is why the test is
+        // not wantsShown() alone. That answers "is the lyric view on screen right now", and it
+        // says no the moment the screen does off - so the always-on display, which keeps drawing
+        // this card, lost the thumbnail every time the screen went dark. With the screen off the
+        // question is the standing one instead: are the lyrics what this lock screen is showing.
+        boolean lyricsUp = LockLyrics.wantsShown()
+                || (!screenOnCached() && LockLyrics.wantsAttached());
+        boolean hideArt = sMcHideArt && !(sMcArtInLyrics && lyricsUp);
+        float hideP = hideArt ? p : 0f;
+        // Centring is not a setting of its own any more: a title with no thumbnail beside
+        // it belongs in the middle, and a title that has one does not. So it follows the same
+        // number the thumbnail does, which also means the lyrics exception above moves both at
+        // once - the thumbnail comes back and the title steps aside for it in the same frame.
+        float centreP = hideP;
         View art = sCardArt;
         if (art != null) {
             // INVISIBLE at the far end, not GONE: the constraints around it are the card's

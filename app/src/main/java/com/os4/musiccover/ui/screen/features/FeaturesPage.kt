@@ -1,6 +1,11 @@
 package com.os4.musiccover.ui.screen.features
 
 import android.content.Intent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -252,7 +257,6 @@ internal fun CoverPageView(
                 cardRadius = shots.cardRadius,
                 artSlot = shots.artSlot,
                 cardHideArt = module.mcHideArt,
-                cardCenterText = module.mcCenterText,
                 clockHour = shots.clockHour,
                 clockMinute = shots.clockMinute,
                 date = shots.date,
@@ -386,6 +390,20 @@ private fun ClockGroup(
                 ModuleBridge.setGlassEnd(context, glassEnd)
             },
         )
+        // Not a cover setting and not tied to cover mode: it is the clock the lock screen always
+        // has. It sits here because this is the page about the clock, and it is a switch rather
+        // than something always on because it changes what the clock looks like - which the
+        // other restrictions this module lifts do not.
+        SwitchPreference(
+            title = stringResource(R.string.clock_force_colon),
+            summary = stringResource(R.string.clock_force_colon_summary),
+            checked = module.forceColon,
+            enabled = enabled,
+            onCheckedChange = {
+                onChange(module.copy(forceColon = it))
+                ModuleBridge.setForceColon(context, it)
+            },
+        )
     }
 }
 
@@ -502,16 +520,26 @@ private fun CardGroup(
                 onCardRestyled()
             },
         )
-        SwitchPreference(
-            title = stringResource(R.string.card_center_text),
-            checked = module.mcCenterText,
-            enabled = enabled,
-            onCheckedChange = {
-                onChange(module.copy(mcCenterText = it))
-                ModuleBridge.setCardCenterText(context, it)
-                onCardRestyled()
-            },
-        )
+        // Unfolds directly under the switch it belongs to, inside the same card: it is not a
+        // fourth media card setting, it is the exception to the one above, and it only exists
+        // while that one is on.
+        AnimatedVisibility(
+            visible = module.mcHideArt,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut(),
+        ) {
+            SwitchPreference(
+                title = stringResource(R.string.card_art_in_lyrics),
+                summary = stringResource(R.string.card_art_in_lyrics_summary),
+                checked = module.mcArtInLyrics,
+                enabled = enabled,
+                onCheckedChange = { on ->
+                    onChange(module.copy(mcArtInLyrics = on))
+                    ModuleBridge.setCardArtInLyrics(context, on)
+                    onCardRestyled()
+                },
+            )
+        }
         // Requested for a reason of its own: on this card the real play/pause button sits over
         // the fingerprint sensor, so a thumb aiming for it unlocks the phone instead. The title
         // is the one part of the card that is both big and far from the sensor.

@@ -75,9 +75,12 @@ object ModuleBridge {
         val track: String = "",
         val player: String = "",
         val mcHideArt: Boolean = false,
-        val mcCenterText: Boolean = false,
+        /** With [mcHideArt] on, show the thumbnail anyway while the lyrics are up. */
+        val mcArtInLyrics: Boolean = false,
         val mcTitleTap: Boolean = false,
         val hideFingerprint: Boolean = false,
+        /** Draw the big clock's colon on the styles that drop it. */
+        val forceColon: Boolean = false,
         /** Lock screen lyrics, between the collapsed clock and the card. */
         val lyrics: Boolean = false,
         /** Keep the screen lit while lock screen lyrics are playing. */
@@ -191,11 +194,11 @@ object ModuleBridge {
     fun setClockResponse(context: Context, seconds: Float) =
         send(context, "clockspring") { putExtra("v", seconds) }
 
+    fun setCardArtInLyrics(context: Context, on: Boolean) =
+        send(context, "mediacard") { putExtra("lyricart", on) }
+
     fun setCardHideArt(context: Context, on: Boolean) =
         send(context, "mediacard") { putExtra("hideart", on) }
-
-    fun setCardCenterText(context: Context, on: Boolean) =
-        send(context, "mediacard") { putExtra("centertext", on) }
 
     fun setCardTitleTap(context: Context, on: Boolean) =
         send(context, "mediacard") { putExtra("titletap", on) }
@@ -205,6 +208,9 @@ object ModuleBridge {
     // wire would make moving it later a protocol change.
     fun setHideFingerprint(context: Context, on: Boolean) =
         send(context, "hidefp") { putExtra("on", on) }
+
+    fun setForceColon(context: Context, on: Boolean) =
+        send(context, "colon") { putExtra("on", on) }
 
     fun setLyrics(context: Context, on: Boolean) =
         send(context, "lyrics") { putExtra("on", on) }
@@ -453,9 +459,10 @@ object ModuleBridge {
             track = b.getString("track") ?: "",
             player = b.getString("player") ?: "",
             mcHideArt = b.getBoolean("mcart", false),
-            mcCenterText = b.getBoolean("mctext", false),
+            mcArtInLyrics = b.getBoolean("mclyricart", false),
             mcTitleTap = b.getBoolean("mctap", false),
             hideFingerprint = b.getBoolean("hidefp", false),
+            forceColon = b.getBoolean("colon", false),
             lyrics = b.getBoolean("lyrics", false),
             lyricsKeepOn = b.getBoolean("lyrickeep", false),
             lyricsHdr = b.getBoolean("lyrichdr", false),
@@ -501,14 +508,35 @@ object ModuleBridge {
      * Every process the module is scoped to, in one go.
      *
      * Read from the scope list the module ships rather than hard-coded, so this keeps meaning
-     * "everything the module touches" if that list ever grows. For both entries today the process
-     * to restart has the same name as the package.
+     * "everything the module touches" if that list ever grows.
+     *
+     * A package's own name is not enough any more. The lock screen editor runs as
+     * `com.miui.aod:keyguardeditor`, and `pidof` matches a process name exactly - so the entry
+     * that was added for the editor restarted everything except the editor, which is the one
+     * process the hooks on it had to be re-read into. [killTree] takes the sub-processes too.
      */
     fun restartScope(context: Context): Boolean {
         val scoped = context.resources.getStringArray(R.array.xposedscope)
         var all = true
-        for (pkg in scoped) if (!kill(pkg)) all = false
+        for (pkg in scoped) if (!killTree(pkg)) all = false
         return all
+    }
+
+    /**
+     * The package's process and every `package:name` process under it.
+     *
+     * `pkill -f` matches the whole command line, which for an Android app is its process name,
+     * and the anchor stops `com.miui.aod` from also matching a package that merely ends with it.
+     * A package with nothing running is not a failure: pkill reports "no match" and the caller
+     * only wants to know that nothing refused to die.
+     */
+    private fun killTree(pkg: String): Boolean = try {
+        val p = Runtime.getRuntime().exec(
+            arrayOf("su", "-c", "pkill -f '^$pkg(\$|:)' ; true"),
+        )
+        p.waitFor() == 0
+    } catch (_: Throwable) {
+        false
     }
 
     private fun kill(process: String): Boolean = try {
