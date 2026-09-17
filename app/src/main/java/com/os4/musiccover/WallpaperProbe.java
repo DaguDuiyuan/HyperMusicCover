@@ -109,7 +109,31 @@ public class WallpaperProbe {
      * the lyrics fades frosted to frosted with nothing else knowing. Cleared when the cover goes.
      */
     private static volatile boolean sLyricBlur;
+    /**
+     * The newest thing SystemUI has asked for, which is not the same as what is on screen: a
+     * switch waits for a fade in the air before it takes effect. Recorded the moment the message
+     * arrives, so a waiting one that has since been overtaken can drop out instead of writing a
+     * stale answer back - which is how a track changed at the moment the lyrics arrived could
+     * leave the cover sharp for the rest of the song, both sides believing it was blurred.
+     */
+    private static volatile boolean sLyricBlurWant;
     private static Bitmap sFrosted, sFrostedOf;
+    private static Bitmap sFrosted2, sFrostedOf2;
+
+    /**
+     * One track change, segment by segment, read back with `op timing`.
+     *
+     * Both processes read the same uptimeMillis clock and SystemUI sends its own marks along with
+     * the cover, so the whole path - the card naming a new track, the artwork being waited for,
+     * the broadcast, the composition, the upload - subtracts into one timeline here. Everything
+     * is a bare field write on a path that already exists; nothing is measured that was not
+     * already happening.
+     */
+    private static volatile long sTmT0, sTmBurst, sTmArt, sTmSent, sTmRecv, sTmRead, sTmComposed,
+            sTmFrosted, sTmMain, sTmUploaded, sTmCheckMs;
+    private static volatile long sTmSkip;
+    private static volatile int sTmTries, sTmSkips, sTmSkipDir;
+    private static volatile String sTmKind = "";
 
     /**
      * The keyguard engine, captured so a new track can re-run the texture upload without the
@@ -359,6 +383,17 @@ public class WallpaperProbe {
      *   --es op fadems --ei v 370
      */
     private static volatile long sFadeMs = 370L;
+    /**
+     * The crossfade for a TRACK CHANGE, which is a different animation with a different job.
+     *
+     * sFadeMs above is solved against the clock's spring, because entering and leaving cover mode
+     * move the wallpaper and the clock together and they have to arrive together. A track change
+     * moves neither the clock nor anything else: it swaps one cover for the next, with nothing on
+     * screen to keep company with. Tying it to the clock's number only made it slow.
+     *
+     *   --es op trackfadems --ei v 60
+     */
+    private static volatile long sTrackFadeMs = 180L;
     private static final long FADE_STEP_MS = 16L;
     /**
      * Whether the OEM's frosted copy is regenerated on the fade's frames.
@@ -656,6 +691,10 @@ public class WallpaperProbe {
                         }
                         fitted = frostedIfWanted(fitted);
                         args[0] = fitted;
+                        // The first upload after a push is the one the user sees. Later ones (a
+                        // fade's frames) leave the mark where it was, so `op timing` reports the
+                        // moment the new cover reached the screen, not the end of its animation.
+                        if (sTmUploaded == 0L) sTmUploaded = SystemClock.uptimeMillis();
                         Xp.log(TAG + "wallpaper texture REPLACED " + describe(orig)
                                 + " -> " + describe(fitted)
                                 + (fitted == art ? " (no rescale)" : ""));
@@ -1029,17 +1068,53 @@ public class WallpaperProbe {
         return sharp == null || !sLyricBlur ? sharp : frostedOf(sharp);
     }
 
-    /** The frosted copy of one fitted picture, made once. Called off the GL thread first. */
+    /**
+     * The frosted copy of one fitted picture, made once. Called off the GL thread first.
+     *
+     * Two are kept, because a track change needs both ends of its crossfade at the same time -
+     * the song going out and the one coming in. With one slot, the incoming picture evicted the
+     * outgoing one and the fade paid for it a second time, which is the cost this is here to
+     * avoid in the first place.
+     */
     private static synchronized Bitmap frostedOf(Bitmap sharp) {
-        Bitmap f = sFrosted;
-        if (f != null && sFrostedOf == sharp && !f.isRecycled()) return f;
+        if (sFrosted != null && sFrostedOf == sharp && !sFrosted.isRecycled()) return sFrosted;
+        if (sFrosted2 != null && sFrostedOf2 == sharp && !sFrosted2.isRecycled()) {
+            // Answered from the older slot: make it the newer one, so the next picture evicts
+            // whichever of the two has gone longest without being asked for.
+            Bitmap f = sFrosted2, of = sFrostedOf2;
+            sFrosted2 = sFrosted;
+            sFrostedOf2 = sFrostedOf;
+            sFrosted = f;
+            sFrostedOf = of;
+            return f;
+        }
         long t0 = SystemClock.uptimeMillis();
-        f = CoverCompose.frosted(sharp);
-        sFrosted = f;
-        sFrostedOf = sharp;
+        Bitmap f = CoverCompose.frosted(sharp);
+        cacheFrosted(sharp, f);
         Xp.log(TAG + "frosted " + describe(sharp) + " in " + (SystemClock.uptimeMillis() - t0)
                 + "ms");
         return f;
+    }
+
+    /** Puts a frosted copy in the newer slot, keyed on the sharp picture it stands in for. */
+    private static synchronized void cacheFrosted(Bitmap sharp, Bitmap frosted) {
+        if (frosted == null) return;
+        sFrosted2 = sFrosted;
+        sFrostedOf2 = sFrostedOf;
+        sFrosted = frosted;
+        sFrostedOf = sharp;
+    }
+
+    /**
+     * Lets go of both frosted copies. Not recycled: a fade in the air holds its own reference to
+     * whichever one it is drawing from, and dropping ours only means the next one is made again.
+     * Called when the cover goes, where two screen-sized bitmaps are pure cost.
+     */
+    private static synchronized void dropFrosted() {
+        sFrosted = null;
+        sFrostedOf = null;
+        sFrosted2 = null;
+        sFrostedOf2 = null;
     }
 
     private static Bitmap sharpFittedArt() {
@@ -1123,6 +1198,11 @@ public class WallpaperProbe {
      * transition. The clock is springing to its own curve over in SystemUI and cannot wait.
      */
     private static void startFade(final Bitmap from, final Bitmap to, final Runnable done) {
+        startFade(from, to, done, sFadeMs);
+    }
+
+    private static void startFade(final Bitmap from, final Bitmap to, final Runnable done,
+                                  final long durMs) {
         final Context ctx = sCtx;
         if (ctx == null || from == null || to == null || from.isRecycled() || to.isRecycled()
                 || from.getWidth() != to.getWidth() || from.getHeight() != to.getHeight()) {
@@ -1132,7 +1212,7 @@ public class WallpaperProbe {
             return;
         }
         if (gpuFadeUsable()) {
-            startGpuFade(from, to, done);
+            startGpuFade(from, to, done, durMs);
             return;
         }
         if (fadeTooExpensive(from)) {
@@ -1170,7 +1250,7 @@ public class WallpaperProbe {
                     return;
                 }
                 long el = now - t0;
-                if (el >= sFadeMs) {
+                if (el >= durMs) {
                     sFade = null;
                     sFadeInFlight = false;
                     sFrostSkipping = false;
@@ -1184,7 +1264,7 @@ public class WallpaperProbe {
                             + (sSkipFrost ? ", frosting skipped" : ""));
                     return;
                 }
-                float t = el / (float) sFadeMs;
+                float t = el / (float) durMs;
                 // Ease OUT, not smoothstep. The clock it has to keep company with is a spring,
                 // and a spring is all front-loaded: most of the movement is over in the first
                 // third. A symmetric curve spends that third barely changing, which is exactly
@@ -1278,7 +1358,7 @@ public class WallpaperProbe {
         return false;
     }
 
-    private static void startGpuFade(Bitmap from, Bitmap to, Runnable done) {
+    private static void startGpuFade(Bitmap from, Bitmap to, Runnable done, long durMs) {
         // A CPU fade still running owns sFade; stop it before the texture changes hands. A GPU
         // fade overtaken by this one simply stops too, without running its completion - the
         // same rule the CPU fade's generation check follows, and for the same reason: the one
@@ -1298,7 +1378,7 @@ public class WallpaperProbe {
                 // Both pictures are already on the GPU, so this runs the same pair backwards
                 // from the alpha on screen right now, and uploads nothing to do it.
                 float target = old.a1 >= 0.5f ? 0f : 1f;
-                f = new GpuFade(old.from, old.to, a, target, to, sFadeMs, done);
+                f = new GpuFade(old.from, old.to, a, target, to, durMs, done);
                 f.inherit = old;
                 f.armed = old.armed;
                 f.t0 = old.armed ? SystemClock.uptimeMillis() : 0L;
@@ -1315,10 +1395,10 @@ public class WallpaperProbe {
                         && near.getHeight() == to.getHeight()) {
                     from = near;
                 }
-                f = startFreshGpuFade(from, to, done);
+                f = startFreshGpuFade(from, to, done, durMs);
             }
         } else {
-            f = startFreshGpuFade(from, to, done);
+            f = startFreshGpuFade(from, to, done, durMs);
         }
         final android.view.Choreographer ch = android.view.Choreographer.getInstance();
         ch.postFrameCallback(new android.view.Choreographer.FrameCallback() {
@@ -1344,8 +1424,8 @@ public class WallpaperProbe {
     }
 
     /** A fade from `from` to `to` from the start: one reload uploads `to` underneath. */
-    private static GpuFade startFreshGpuFade(Bitmap from, Bitmap to, Runnable done) {
-        GpuFade f = new GpuFade(from, to, 1f, 0f, to, sFadeMs, done);
+    private static GpuFade startFreshGpuFade(Bitmap from, Bitmap to, Runnable done, long durMs) {
+        GpuFade f = new GpuFade(from, to, 1f, 0f, to, durMs, done);
         sUploadOverride = to;
         sGpuFade = f;
         reloadEngine(sKeyguardEngine, true);
@@ -1713,6 +1793,25 @@ public class WallpaperProbe {
                         // Whatever arrives now is newer than a composition still in progress,
                         // which would otherwise land after it and put an older cover back.
                         if (!i.hasExtra("src")) sSrcSeq++;
+                        // What the lyrics want of THIS cover. See applyArt(), which is where it
+                        // takes effect; older builds of SystemUI send no such extra.
+                        if (i.hasExtra("lyricblur")) {
+                            sLyricBlurWant = i.getBooleanExtra("lyricblur", false);
+                        }
+                        if (i.hasExtra("tsent")) {
+                            sTmT0 = i.getLongExtra("t0", 0L);
+                            sTmSkip = i.getLongExtra("tskip", 0L);
+                            sTmSkipDir = i.getIntExtra("skipdir", 0);
+                            sTmBurst = i.getLongExtra("tburst", 0L);
+                            sTmSkips = i.getIntExtra("skips", 0);
+                            sTmArt = i.getLongExtra("tart", 0L);
+                            sTmSent = i.getLongExtra("tsent", 0L);
+                            sTmCheckMs = i.getLongExtra("checkms", 0L);
+                            sTmTries = i.getIntExtra("tries", 0);
+                            sTmRecv = SystemClock.uptimeMillis();
+                            sTmRead = sTmComposed = sTmFrosted = sTmMain = sTmUploaded = 0L;
+                            sTmKind = i.hasExtra("src") ? "source" : "jpeg";
+                        }
                         if (i.getBooleanExtra("off", false)) {
                             // A live wallpaper has no texture to fade back to - the way back
                             // is handing the surface to its player again.
@@ -1735,6 +1834,8 @@ public class WallpaperProbe {
                                         sFitted = null;
                                         sFittedOf = null;
                                         sLyricBlur = false;
+                                        sLyricBlurWant = false;
+                                        dropFrosted();
                                         new File(cc.getFilesDir(), ART_FILE).delete();
                                         new File(cc.getFilesDir(), SRC_FILE).delete();
                                         Xp.log(TAG + "art cleared");
@@ -1744,6 +1845,8 @@ public class WallpaperProbe {
                             }
                             sArt = null;
                             sLyricBlur = false;
+                            sLyricBlurWant = false;
+                            dropFrosted();
                             new File(c.getFilesDir(), ART_FILE).delete();
                             new File(c.getFilesDir(), SRC_FILE).delete();
                             Xp.log(TAG + "art cleared");
@@ -1760,6 +1863,14 @@ public class WallpaperProbe {
                             // decodeFile() so that the rest of this is unchanged: the same
                             // decoder scales to the texture, and the same bytes are what gets
                             // written to this process's own copy on disk for the next start.
+                            // A composed picture arriving means SystemUI does not know this
+                            // process composes for itself: its question or our answer went
+                            // missing, which is what happens when both processes restart at once
+                            // and each one's hello lands before the other has a receiver. Left
+                            // alone it stands for the life of the process, and every track then
+                            // pays for a full-screen compose AND a JPEG encode (~180ms measured)
+                            // over there, plus the decode here. Answering again fixes the next one.
+                            sayHello(c);
                             if (jpg == null && file != null) jpg = readBytes(file);
                             Bitmap b = null;
                             if (jpg != null) b = decodeToTextureSize(jpg);
@@ -1799,6 +1910,11 @@ public class WallpaperProbe {
                         long v = i.getIntExtra("v", (int) sFadeMs);
                         sFadeMs = v < 60L ? 60L : (v > 1200L ? 1200L : v);
                         Xp.log(TAG + "crossfade is now " + sFadeMs + "ms");
+                    } else if ("trackfadems".equals(op)) {
+                        long v = i.getIntExtra("v", (int) sTrackFadeMs);
+                        // Floored at a frame: the GPU fade divides by this.
+                        sTrackFadeMs = v < 16L ? 16L : (v > 1200L ? 1200L : v);
+                        Xp.log(TAG + "track-change crossfade is now " + sTrackFadeMs + "ms");
                     } else if ("hello".equals(op)) {
                         sayHello(c);
                     } else if ("gpufade".equals(op)) {
@@ -1823,6 +1939,10 @@ public class WallpaperProbe {
                                 + " videoEngine=" + sVideoEngine);
                     } else if ("vgl".equals(op)) {
                         videoWindowTakeover(i.getBooleanExtra("on", true));
+                    } else if ("timing".equals(op)) {
+                        String rep = timingReport();
+                        for (String line : rep.split("\n")) Xp.log(TAG + line);
+                        setResultData(rep);
                     } else if ("selftest".equals(op)) {
                         String rep = selfTest();
                         for (String line : rep.split("\n")) Xp.log(TAG + line);
@@ -1844,11 +1964,83 @@ public class WallpaperProbe {
     }
 
     /**
+     * The last track change, segment by segment.
+     *
+     * Segments are printed only where both ends were actually stamped, so the JPEG path - which
+     * has no source read and no composition on this side - reports what it did rather than a row
+     * of zeroes claiming it was instant.
+     */
+    private static String timingReport() {
+        if (sTmRecv == 0L) {
+            return "=== cover timing ===\nno push seen yet."
+                    + " Change a track with the lock screen up, then ask again.";
+        }
+        StringBuilder sb = new StringBuilder("=== cover timing === (" + sTmKind + " path)");
+        // Absolute, so a press stamped outside this process (`cut -d" " -f1 /proc/uptime` in the
+        // same shell command as the key event) can be subtracted from it: what is left is the
+        // player's own share, which is the part none of the segments below can see.
+        sb.append("\n  the module saw the new track at (uptime): ").append(sTmT0).append("ms");
+        // The head start: the press, heard in SystemUI, against the player getting round to
+        // saying so. This is the room a prefetch would have to work in.
+        if (sTmSkip > 0L && sTmT0 > sTmSkip) {
+            sb.append("\n  the PLAYER took: ").append(sTmT0 - sTmSkip)
+                    .append("ms to report the ")
+                    .append(sTmSkipDir < 0 ? "previous" : "next")
+                    .append(" track (we knew the moment it was asked for)");
+        }
+        seg(sb, "waiting for the artwork", sTmT0, sTmArt,
+                sTmTries > 0 ? sTmTries + (sTmTries == 1 ? " try" : " tries") : null);
+        seg(sb, "  of which the wallpaper check", sTmCheckMs);
+        seg(sb, "preparing and writing it", sTmArt, sTmSent, null);
+        seg(sb, "broadcast in flight", sTmSent, sTmRecv, null);
+        seg(sb, "reading the source", sTmRecv, sTmRead, null);
+        seg(sb, "composing", sTmRead, sTmComposed, null);
+        seg(sb, "frosting for the lyrics", sTmComposed, sTmFrosted, null);
+        seg(sb, "on to the main thread", sTmFrosted > 0 ? sTmFrosted : sTmComposed, sTmMain, null);
+        seg(sb, "uploading the texture", sTmMain, sTmUploaded, null);
+        long end = sTmUploaded > 0L ? sTmUploaded : sTmMain;
+        if (sTmT0 > 0L && end > sTmT0) {
+            sb.append("\n  ---\n  this press to cover on screen: ").append(end - sTmT0)
+                    .append("ms");
+        }
+        // What someone pressing next repeatedly actually watches: the presses in between were
+        // thrown away, and the screen held the old cover for all of it.
+        if (sTmBurst > 0L && end > sTmBurst && sTmSkips > 0) {
+            sb.append("\n  FIRST press of this burst to cover on screen: ")
+                    .append(end - sTmBurst).append("ms (")
+                    .append(sTmSkips).append(" more press")
+                    .append(sTmSkips == 1 ? "" : "es").append(" swallowed on the way)");
+        }
+        // The two halves of the lyrics' blur. They disagreeing is the bug where a track changed
+        // at the moment the lyrics arrived and the cover stayed sharp for the rest of the song:
+        // `want` is what SystemUI last asked for, `on` is what the cover is actually drawn with.
+        sb.append("\nlyric blur: ").append(sLyricBlur ? "on" : "off")
+                .append(", asked for: ").append(sLyricBlurWant ? "on" : "off")
+                .append(sLyricBlur == sLyricBlurWant ? "" : "   <- OUT OF STEP");
+        sb.append("\ncrossfade after that: ").append(sTrackFadeMs)
+                .append("ms on a track change, ").append(sFadeMs)
+                .append("ms entering or leaving cover mode");
+        return sb.toString();
+    }
+
+    private static void seg(StringBuilder sb, String name, long from, long to, String note) {
+        if (from <= 0L || to <= 0L || to < from) return;
+        sb.append("\n  ").append(name).append(": ").append(to - from).append("ms");
+        if (note != null) sb.append(" (").append(note).append(')');
+    }
+
+    private static void seg(StringBuilder sb, String name, long ms) {
+        if (ms <= 0L) return;
+        sb.append("\n  ").append(name).append(": ").append(ms).append("ms");
+    }
+
+    /**
      * Frosts the cover for the lyrics, or clears it. The blur is made on the composer thread; the
      * fade waits for one already in the air - the cover arriving, a track changing - to land
      * first, because a new fade starts from the picture it is handed, not from what is on screen.
      */
     private static void setLyricBlur(final boolean on) {
+        sLyricBlurWant = on;
         composer().post(new Runnable() {
             @Override
             public void run() {
@@ -1859,6 +2051,10 @@ public class WallpaperProbe {
                 h.post(new Runnable() {
                     @Override
                     public void run() {
+                        // Overtaken while this one was waiting out a fade. The wait re-posts,
+                        // so a newer switch reaches the main thread first and this one would
+                        // otherwise land afterwards and undo it.
+                        if (on != sLyricBlurWant) return;
                         if (on == sLyricBlur) return;
                         if ((sFade != null || sGpuFade != null)
                                 && SystemClock.uptimeMillis() - t0 < 1500L) {
@@ -1898,10 +2094,24 @@ public class WallpaperProbe {
      * Main thread.
      */
     private static void applyArt(Bitmap b, boolean reload, boolean fade) {
+        sTmMain = SystemClock.uptimeMillis();
         // Read before sArt moves: on the way into cover mode this is the lock wallpaper, and on
         // a track change it is the album that is on screen right now.
         Bitmap from = fittedArt();
+        // Already showing a cover means this picture replaces another one: a track change, which
+        // is the fade that has nothing to keep company with and gets the short duration. With no
+        // cover yet, what it fades from is the lock wallpaper - that is cover mode opening, and
+        // it travels with the clock. See sTrackFadeMs.
+        boolean trackChange = from != null;
         if (from == null) from = sOrig;
+        // A cover carries what the lyrics wanted at the moment it was sent, so a track change is
+        // also where the two processes settle any disagreement: a lost broadcast, or a switch
+        // that never landed. Applied after `from` and before `to`, so the new cover simply
+        // arrives with the right finish instead of fading in sharp and frosting a beat later.
+        if (sLyricBlur != sLyricBlurWant) {
+            sLyricBlur = sLyricBlurWant;
+            Xp.log(TAG + "lyric blur " + (sLyricBlur ? "on" : "off") + " with the new cover");
+        }
         sArt = b;
         sAsks = 0;
         sFitted = null;
@@ -1909,8 +2119,9 @@ public class WallpaperProbe {
         Bitmap to = fittedArt();   // scale here, not on the GL thread
         Xp.log(TAG + "art set " + describe(b));
         if (videoPath()) videoWindowTakeover(false);
-        else if (fade && from != null && to != null) startFade(from, to, null);
-        else if (reload) reloadTexture();
+        else if (fade && from != null && to != null) {
+            startFade(from, to, null, trackChange ? sTrackFadeMs : sFadeMs);
+        } else if (reload) reloadTexture();
     }
 
     /** Where this process keeps the last source, to compose again after its own restart. */
@@ -1953,9 +2164,24 @@ public class WallpaperProbe {
                         return;
                     }
                     read = SystemClock.uptimeMillis();
+                    sTmRead = read;
                     if (seq != sSrcSeq) return;
                     b = CoverCompose.composeWallpaper(s.src, s.w, s.h, s.bias);
                     composed = SystemClock.uptimeMillis();
+                    sTmComposed = composed;
+                    // Under the lyrics the picture that actually goes up is the frosted copy, and
+                    // making it is another full-screen blur. Left to applyArt() it would be made
+                    // on the main thread, in front of the crossfade the track change is waiting
+                    // on. Made here it is already in the cache by the time that asks - keyed on
+                    // this very bitmap, so it only hits when the composition is texture-sized,
+                    // which is the normal case (the texture is composed to the screen).
+                    if (sLyricBlurWant && b.getWidth() == sReportedW && b.getHeight() == sReportedH) {
+                        // Built from the source and the layout, not from `b` - see
+                        // CoverCompose.frostedFor() - but cached under `b`, which is what every
+                        // reader asks with once this becomes the art.
+                        cacheFrosted(b, CoverCompose.frostedFor(s.src, s.w, s.h, s.bias));
+                    }
+                    sTmFrosted = SystemClock.uptimeMillis();
                     saveSourceLater(c, s);
                 } catch (Throwable t) {
                     Xp.log(TAG + "composing from the source failed: " + t);

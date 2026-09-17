@@ -835,6 +835,39 @@ public class Main extends XposedModule {
                     + "the AOD: " + t);
         }
 
+        // The press itself, ~0.8s before the player admits anything changed.
+        //
+        // Measured on this phone: from the key landing to the module being told a new track is
+        // playing is 713-972ms, all of it inside the player. Everything the cover does after that
+        // costs ~110ms. So the only way to make a track change feel immediate is to hear the
+        // press rather than the consequence - and this is where the press is, in this process,
+        // on the way out to the player.
+        //
+        // Hooked here rather than on the card's buttons on purpose. `action0..action4` are laid
+        // out in whatever order the player's custom actions arrive in (Apple Music puts prev at
+        // action1 and next at action3, with 喜爱 and 随机播放 either side), the ids are AOSP's
+        // generic ones, and the content descriptions are localised. TransportControls is public
+        // API, cannot be renamed, and says what was MEANT - and it catches every route to it, not
+        // just the lock screen's own buttons.
+        try {
+            Class<?> tc = Xp.findClass("android.media.session.MediaController$TransportControls",
+                    cl);
+            Xp.hookAll(tc, "skipToNext", chain -> {
+                noteSkip(1);
+                return chain.proceed();
+            });
+            Xp.hookAll(tc, "skipToPrevious", chain -> {
+                noteSkip(-1);
+                return chain.proceed();
+            });
+            Xp.log(TAG + "transport controls hooked");
+        } catch (Throwable t) {
+            // Independently, like every other hook here: without it a track change simply waits
+            // for the player, which is what it did before.
+            Xp.log(TAG + "transport control hook failed, a skip is only noticed when the player "
+                    + "reports it: " + t);
+        }
+
         // The OEM's own hand-over between the lock screen and the AOD, both ways.
         //
         // Into the AOD it lands after the screen fade has gone to black and before the AOD is
@@ -1572,6 +1605,10 @@ public class Main extends XposedModule {
                         if (i.hasExtra("bias")) sBias = clamp01(i.getFloatExtra("bias", sBias));
                         sTrackKey = on ? trackKey(pickController(c)) : "";
                         setCoverEnabled(on, i.getBooleanExtra("anim", true), false);
+                    } else if ("mediabtn".equals(op)) {
+                        setResultData(dumpClickables());
+                    } else if ("queue".equals(op)) {
+                        setResultData(dumpQueues());
                     } else if ("wphello".equals(op)) {
                         // The wallpaper process, on its start or when asked, saying what it can
                         // take. See sWpComposes.
@@ -4849,6 +4886,20 @@ public class Main extends XposedModule {
         if (sVideoWallpaper) showVideoCover(ctx, on, art);
         long t0 = android.os.SystemClock.uptimeMillis();
         Intent out = wallpaperIntent("art");
+        // The blur travels with the cover. A lyricblur broadcast is one shot - dropped, or
+        // overtaken on the other side - and nothing else ever corrected it, so a song could play
+        // out sharp under its lyrics. This makes every track change an agreement between the two
+        // processes, and it also saves the new cover fading in sharp and frosting a beat later.
+        out.putExtra("lyricblur", LockLyrics.blurWanted());
+        // This side's half of the timeline, for `op timing` over there. See sCtTrack.
+        out.putExtra("t0", sCtTrack);
+        out.putExtra("tskip", sSkipAt);
+        out.putExtra("skipdir", sSkipDir);
+        out.putExtra("tburst", sCtBurst);
+        out.putExtra("skips", sCtSkips);
+        out.putExtra("tart", sCtArt);
+        out.putExtra("checkms", sCtCheckMs);
+        out.putExtra("tries", sCtTries);
         // Only a request. The wallpaper process falls back to the one-frame swap whenever it
         // does not hold both ends of the fade - after its own restart, most of all. Never with
         // the display off: the frames would be composed and uploaded into a screen nobody is
@@ -4888,6 +4939,7 @@ public class Main extends XposedModule {
             }
             if (shared != null) {
                 out.putExtra("src", shared);
+                out.putExtra("tsent", android.os.SystemClock.uptimeMillis());
                 ctx.sendBroadcast(out);
                 long sent = android.os.SystemClock.uptimeMillis();
                 // Still composed here, but now after the send: the clock's tint and the shade
@@ -4954,6 +5006,7 @@ public class Main extends XposedModule {
         String shared = writeSharedArt(jpg);
         if (shared != null) out.putExtra("file", shared);
         else out.putExtra("jpg", jpg);
+        out.putExtra("tsent", android.os.SystemClock.uptimeMillis());
         ctx.sendBroadcast(out);
         // After the send: the shade's background is not what anyone is waiting on.
         ShadeLayer.setArt(art);
@@ -5333,6 +5386,47 @@ public class Main extends XposedModule {
      * that missed by 50ms still cost the full 700. Fourteen tries covers the same ~1.6s window.
      */
     private static final long ART_RETRY_MS = 120L;
+    /**
+     * When the card last named a new track, how long the wallpaper check took, and how many
+     * attempts the artwork needed.
+     *
+     * The whole point of a track change is how long it takes, and until now nobody could say
+     * where the time went - the module's own log does not reach logcat, so a report of "the cover
+     * is slow" had nothing behind it. These ride along with the push (see pushArtToWallpaper) so
+     * the wallpaper process, which holds the other half of the timeline, can print all of it at
+     * once. Both processes read the same uptimeMillis clock, so the two halves simply subtract.
+     */
+    private static volatile long sCtTrack;
+    private static volatile long sCtArt;
+    private static volatile long sCtCheckMs;
+    private static volatile int sCtTries;
+
+    /**
+     * The first track change of a BURST, and how many were swallowed by it.
+     *
+     * Pressing next twice in a row throws the first push away (see sPushGen), so the timing of a
+     * burst reported per-push is the timing of its LAST one - by which point the player has
+     * settled and the artwork is there for the asking. That reads as 60ms while the screen sat on
+     * the old cover for the better part of a second, which is what someone pressing next
+     * repeatedly actually sees. Measured from here instead: the first press of the burst to the
+     * cover that finally arrives.
+     */
+    private static volatile long sCtBurst;
+    private static volatile int sCtSkips;
+
+    /** When a skip was last asked for, and which way. See the TransportControls hook. */
+    private static volatile long sSkipAt;
+    private static volatile int sSkipDir;
+
+    /**
+     * Someone asked the player to change track. Runs on whatever thread made the call, so it does
+     * nothing but write the two fields down.
+     */
+    private static void noteSkip(int dir) {
+        sSkipAt = android.os.SystemClock.uptimeMillis();
+        sSkipDir = dir;
+    }
+
     /** What the wallpaper currently shows, coarsely, so a stale source can be recognised. */
     private static volatile int sArtPrint;
     /**
@@ -5412,7 +5506,13 @@ public class Main extends XposedModule {
         // press a repair button, which is exactly what should not be necessary.
         worker().post(new Runnable() {
             @Override
-            public void run() { ensureLockWallpaper(ctx); }
+            public void run() {
+                // Timed because it is the first thing on this worker and the artwork read is
+                // queued behind it: whatever it costs, the track change pays before it starts.
+                long t = android.os.SystemClock.uptimeMillis();
+                ensureLockWallpaper(ctx);
+                sCtCheckMs = android.os.SystemClock.uptimeMillis() - t;
+            }
         });
         // Not a track change (a bias tweak, a manual pushart): take whatever is there now.
         tryPushArt(ctx, fresh ? 0 : ART_TRIES - 1, fresh, gen);
@@ -5468,6 +5568,8 @@ public class Main extends XposedModule {
                 // wallpaper showing what it already showed, and recording 0 here would claim it
                 // was empty and disarm the stale-art check on the next track change.
                 if (art != null) sArtPrint = print;
+                sCtTries = attempt + 1;
+                sCtArt = android.os.SystemClock.uptimeMillis();
                 pushArtToWallpaper(ctx, true, art);
             }
         }, attempt == 0 ? 0L : ART_RETRY_MS);
@@ -5491,11 +5593,40 @@ public class Main extends XposedModule {
         return ensureLockWallpaper(ctx, false);
     }
 
+    /** When the check below last ran, and what it answered. See ensureLockWallpaper(). */
+    private static volatile long sWpCheckedAt;
+    private static volatile boolean sWpCheckedAnswer;
+
+    /**
+     * How long that answer stands. The check is the first thing on the worker before every push,
+     * and the artwork read is queued behind it, so its cost lands in front of every track change:
+     * two wallpaper files opened and their headers decoded, MIUI's records parsed for both slots,
+     * and half a dozen binder calls - all to notice something the user changes by hand, at most
+     * once in a while.
+     *
+     * A few seconds is the whole point: pressing next repeatedly is exactly when the delay shows,
+     * and it is also exactly when nothing about the wallpaper can have changed. Anything slower
+     * than this still gets the full check, and a forced one never consults this at all.
+     */
+    private static final long WP_CHECK_TTL_MS = 5000L;
+
+    @SuppressLint("MissingPermission")
+    private static boolean ensureLockWallpaper(Context ctx, boolean force) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (!force && sWpCheckedAt != 0L && now - sWpCheckedAt < WP_CHECK_TTL_MS) {
+            return sWpCheckedAnswer;
+        }
+        boolean r = checkLockWallpaper(ctx, force);
+        sWpCheckedAt = android.os.SystemClock.uptimeMillis();
+        sWpCheckedAnswer = r;
+        return r;
+    }
+
     // Runs inside com.android.systemui, which holds SET_WALLPAPER and
     // READ_WALLPAPER_INTERNAL. This APK neither has nor needs them - it is a library
     // for someone else's process, and lint has no way to know that.
     @SuppressLint("MissingPermission")
-    private static boolean ensureLockWallpaper(Context ctx, boolean force) {
+    private static boolean checkLockWallpaper(Context ctx, boolean force) {
         android.app.WallpaperManager wm = (android.app.WallpaperManager)
                 ctx.getSystemService(Context.WALLPAPER_SERVICE);
         if (wm == null) return false;
@@ -7375,6 +7506,131 @@ public class Main extends XposedModule {
         }
     }
 
+    /**
+     * Every clickable view on the keyguard, with whatever names it into something recognisable.
+     *
+     * For finding the media card's transport buttons: the whole point of hooking them is to hear
+     * the press ~0.8s before the player admits a track changed, and the only reliable way to name
+     * them across HyperOS builds is to look at what is actually there. Content descriptions are
+     * the most durable handle - they are what the accessibility layer reads out, so they survive
+     * the resource-id renames that R8 and OEM reskins do not.
+     */
+    private static String dumpClickables() {
+        try {
+            View root = sContainer == null ? null : sContainer.getRootView();
+            if (root == null) return "no keyguard view - is the lock screen up?";
+            StringBuilder sb = new StringBuilder("=== clickable views on the keyguard ===");
+            collectClickable(root, sb, new int[] {0});
+            return sb.toString();
+        } catch (Throwable t) {
+            return "clickable dump failed: " + Log.getStackTraceString(t);
+        }
+    }
+
+    private static void collectClickable(View v, StringBuilder sb, int[] n) {
+        if (n[0] > 60) return;
+        if (v.isClickable() || v.hasOnClickListeners()) {
+            n[0]++;
+            int[] xy = new int[2];
+            try {
+                v.getLocationOnScreen(xy);
+            } catch (Throwable ignored) {
+            }
+            sb.append('\n').append(v.getClass().getName())
+                    .append(" id=").append(idName(v))
+                    .append(" desc=").append(v.getContentDescription())
+                    .append(" at ").append(xy[0]).append(',').append(xy[1])
+                    .append(' ').append(v.getWidth()).append('x').append(v.getHeight())
+                    .append(v.isShown() ? "" : " (hidden)");
+        }
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) collectClickable(g.getChildAt(i), sb, n);
+        }
+    }
+
+    private static String idName(View v) {
+        int id = v.getId();
+        if (id == View.NO_ID) return "none";
+        try {
+            return v.getResources().getResourceEntryName(id);
+        } catch (Throwable t) {
+            return "0x" + Integer.toHexString(id);
+        }
+    }
+
+    /**
+     * What every active session publishes about its play queue.
+     *
+     * The question behind it: the player takes 0.7-1s to say a track changed, and the only way to
+     * beat that is to know what is coming BEFORE it is asked for. A queue with artwork on its
+     * items is what makes that possible; a queue without one, or no queue at all, means a player
+     * this can never help. Measured per player rather than assumed - see `op queue`.
+     */
+    private static String dumpQueues() {
+        try {
+            return dumpQueuesInner();
+        } catch (Throwable t) {
+            return "queue dump failed: " + Log.getStackTraceString(t);
+        }
+    }
+
+    private static String dumpQueuesInner() {
+        List<MediaController> cs = activeSessions();
+        if (cs == null) return "sessions could not be read";
+        StringBuilder sb = new StringBuilder("=== play queues ===");
+        for (MediaController c : cs) {
+            sb.append('\n').append(c.getPackageName()).append(": ");
+            List<android.media.session.MediaSession.QueueItem> q;
+            try {
+                q = c.getQueue();
+            } catch (Throwable t) {
+                sb.append("getQueue threw ").append(t);
+                continue;
+            }
+            if (q == null || q.isEmpty()) {
+                sb.append("no queue");
+                continue;
+            }
+            long active = -1L;
+            try {
+                android.media.session.PlaybackState ps = c.getPlaybackState();
+                if (ps != null) active = ps.getActiveQueueItemId();
+            } catch (Throwable ignored) {
+            }
+            sb.append(q.size()).append(" items, active id=").append(active);
+            int at = -1;
+            for (int n = 0; n < q.size(); n++) {
+                if (q.get(n).getQueueId() == active) {
+                    at = n;
+                    break;
+                }
+            }
+            sb.append(" (index ").append(at).append(')');
+            // The current item and the one after it: what a prefetch would have to work from.
+            for (int n = Math.max(0, at); n < Math.min(q.size(), Math.max(0, at) + 2); n++) {
+                android.media.MediaDescription d = q.get(n).getDescription();
+                sb.append("\n  [").append(n).append("] ");
+                if (d == null) {
+                    sb.append("no description");
+                    continue;
+                }
+                sb.append('"').append(d.getTitle()).append('"');
+                sb.append(" icon=");
+                android.graphics.Bitmap ib = null;
+                try {
+                    ib = d.getIconBitmap();
+                } catch (Throwable ignored) {
+                }
+                if (ib != null) sb.append(ib.getWidth()).append('x').append(ib.getHeight());
+                else sb.append("none");
+                sb.append(" iconUri=").append(d.getIconUri());
+                sb.append(" mediaId=").append(d.getMediaId());
+            }
+        }
+        return sb.toString();
+    }
+
     /** Track identity as the card itself sees it. */
     private static String cardKey(Object mediaData) {
         try {
@@ -7504,6 +7760,22 @@ public class Main extends XposedModule {
         String key = sCardKey.isEmpty() ? trackKey(sWatched) : sCardKey;
         if (sCoverMode && key.equals(sTrackKey)) return;
         sTrackKey = key;
+        long ctNow = android.os.SystemClock.uptimeMillis();
+        // Still waiting on the artwork for the previous one means this press lands on top of it:
+        // same burst, and the clock keeps running from where it started.
+        // The time limit matters as much as the pending artwork: a push that never found any art
+        // leaves sCtArt at 0 for good, and without a window the next track change an hour later
+        // would still count itself as part of that burst.
+        if (sCtTrack != 0L && sCtArt == 0L && ctNow - sCtTrack < 2500L) {
+            sCtSkips++;
+        } else {
+            sCtBurst = ctNow;
+            sCtSkips = 0;
+        }
+        sCtTrack = ctNow;
+        sCtArt = 0L;
+        sCtCheckMs = 0L;
+        sCtTries = 0;
         Xp.log(TAG + "card track: " + key);
         // Started here rather than once the cover has settled, so the fetch overlaps the
         // transition instead of following it.

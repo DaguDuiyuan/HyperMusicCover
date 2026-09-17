@@ -74,8 +74,18 @@ final class LockLyrics {
      * track starts and the key cannot see the difference.
      */
     private static int sSource = LyricSource.SRC_NONE;
-    /** What the wallpaper process was last told about the blur. Null = unknown. */
-    private static Boolean sBlurSent;
+    /**
+     * What the wallpaper process was last told about the blur. Null = unknown.
+     *
+     * Volatile because every cover push reads it off the push thread: a track change carries the
+     * answer with it, which is what settles a switch the other process missed.
+     */
+    private static volatile Boolean sBlurSent;
+
+    /** Whether the cover should be frosted right now, for a push to carry over. */
+    static boolean blurWanted() {
+        return Boolean.TRUE.equals(sBlurSent);
+    }
 
     private static boolean sDemo;
     private static long sDemoT0;
@@ -211,11 +221,18 @@ final class LockLyrics {
         sSource = LyricSource.SRC_NONE;
         // Set before the lines are emptied, so the blur is held across the lookup instead of
         // being dropped by the empty set and put back when the answer lands.
-        sLoading = sEnabled && !key.isEmpty() && !CACHE.containsKey(key);
+        //
+        // A cached answer counts as a lookup too, short as it is. Excluding it meant the empty
+        // set below sent the blur off and the cache hit one line later sent it straight back on
+        // - two messages, in the middle of the track change's crossfade, which is exactly when
+        // the wallpaper process holds a switch back to wait for the fade. Those two could then
+        // land in the wrong order and leave the cover sharp.
+        sLoading = sEnabled && !key.isEmpty();
         setLines(Collections.<LyricLine>emptyList(), "track changed");
         if (!sEnabled || key.isEmpty()) return;
         Cached hit = CACHE.get(key);
         if (hit != null) {
+            sLoading = false;
             sSource = hit.source;
             setLines(hit.lines, "cached");
             return;
