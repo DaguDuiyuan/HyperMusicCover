@@ -290,6 +290,11 @@ public class Main extends XposedModule {
      *  hidden flag and bring the old wallpaper's subject back over the album cover. Cover mode
      *  is a property of the phone, not of this process, so it has to outlive the process. */
     private static Context sAppCtx;
+
+    /** SystemUI's own context, for the helpers that live outside this file. */
+    static Context appContext() {
+        return sAppCtx;
+    }
     private static final String STATE_FILE = "mc_cover_state";
 
     /** The album cover is the wallpaper: depth cut-out hidden and the clock collapsed. */
@@ -5425,6 +5430,28 @@ public class Main extends XposedModule {
     private static void noteSkip(int dir) {
         sSkipAt = android.os.SystemClock.uptimeMillis();
         sSkipDir = dir;
+        if (!sCoverMode || !screenOn()) return;
+        // What the queue says is coming. Null for a player that publishes no queue, or a track
+        // whose artwork has not been fetched yet - and then this does nothing and the cover waits
+        // for the player exactly as it used to.
+        final Bitmap art = Prefetch.take(dir);
+        if (art == null) return;
+        final Context ctx = sAppCtx;
+        if (ctx == null) return;
+        // Superseding anything in flight, the way a real track change does: this IS the track
+        // change, ~0.8s before the player will admit to it.
+        final int gen = ++sPushGen;
+        sCtTrack = sSkipAt;
+        sCtArt = sSkipAt;
+        sCtTries = 0;
+        sCtCheckMs = 0L;
+        worker().post(new Runnable() {
+            @Override
+            public void run() {
+                if (gen != sPushGen) return;
+                pushArtToWallpaper(ctx, true, art);
+            }
+        });
     }
 
     /** What the wallpaper currently shows, coarsely, so a stale source can be recognised. */
@@ -7578,7 +7605,8 @@ public class Main extends XposedModule {
     private static String dumpQueuesInner() {
         List<MediaController> cs = activeSessions();
         if (cs == null) return "sessions could not be read";
-        StringBuilder sb = new StringBuilder("=== play queues ===");
+        StringBuilder sb = new StringBuilder("=== play queues ===\nprefetch: "
+                + Prefetch.describe());
         for (MediaController c : cs) {
             sb.append('\n').append(c.getPackageName()).append(": ");
             List<android.media.session.MediaSession.QueueItem> q;
@@ -7610,7 +7638,8 @@ public class Main extends XposedModule {
             // The current item and the one after it: what a prefetch would have to work from.
             for (int n = Math.max(0, at); n < Math.min(q.size(), Math.max(0, at) + 2); n++) {
                 android.media.MediaDescription d = q.get(n).getDescription();
-                sb.append("\n  [").append(n).append("] ");
+                sb.append("\n  [").append(n).append("] id=").append(q.get(n).getQueueId())
+                        .append(' ');
                 if (d == null) {
                     sb.append("no description");
                     continue;
@@ -7734,6 +7763,17 @@ public class Main extends XposedModule {
                 + "|" + md.getString(MediaMetadata.METADATA_KEY_ALBUM);
     }
 
+    /** The session's track title, which is what a queue item can be matched against. */
+    private static String titleOf(MediaController c) {
+        if (c == null) return null;
+        try {
+            MediaMetadata md = c.getMetadata();
+            return md == null ? null : md.getString(MediaMetadata.METADATA_KEY_TITLE);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** The controller the card is bound to, or null if the card has not named one. */
     private static MediaController controllerFromCard(Context ctx) {
         android.media.session.MediaSession.Token t = sCardToken;
@@ -7780,6 +7820,16 @@ public class Main extends XposedModule {
         // Started here rather than once the cover has settled, so the fetch overlaps the
         // transition instead of following it.
         LockLyrics.onTrack(key, sWatched);
+        // What is coming after this one, for the next press. Always, not only when the cover is
+        // on: the queue is what makes a press answerable at all, and reading it costs nothing
+        // when it has not moved.
+        Prefetch.onTrack(sWatched);
+        // The player has caught up with a press this already acted on, and the cover on screen is
+        // the right one. Pushing again would compose the same picture and fade it over itself.
+        if (sCoverMode && Prefetch.wasPredicted(titleOf(sWatched))) {
+            Xp.log(TAG + "cover already up from the press, no second push");
+            return;
+        }
         if (sCoverMode) pushArtAsync(true, true);
         else setCoverEnabled(true, true);
     }
