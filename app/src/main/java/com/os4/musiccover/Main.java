@@ -6938,8 +6938,9 @@ public class Main extends XposedModule {
      *
      * sTapSuppressed is what holds it that way. A card being up is exactly what the module reads
      * as "the cover belongs here", so without it the next metadata event would put the cover
-     * straight back. It is the card actually going away that clears it - not a track change -
-     * so the next song starts in cover mode as it always did.
+     * straight back. It lasts as long as the music does: not a track change, not the screen going
+     * off, and not an unlock and a lock again - it is the last session going away that clears it,
+     * and the next thing the user plays then starts from the cover as it always did.
      */
     private static void exitFromTap(String why) {
         sTapSuppressed = true;
@@ -7133,9 +7134,26 @@ public class Main extends XposedModule {
         }
         if (!sCardShowing) {
             sTrackKey = "";
-            // The card going away is what clears a tap-dismissed cover: that decision was about
-            // this session, and the next thing the user plays starts from the cover again.
-            sTapSuppressed = false;
+            // The card going away is what clears a tap-dismissed cover - but only when the music
+            // went with it.
+            //
+            // Unlocking takes the card off the keyguard and the next lock puts it back, and that
+            // round trip arrives here exactly as a dismissal does. Clearing on it unconditionally
+            // is why a cover the user had just tapped away came back on its own: unlock, lock, and
+            // the card returning read as a new session that had never been decided about. The
+            // decision is meant to last as long as the music does.
+            //
+            // An EMPTY session list is the proof that the music itself has ended - a card cannot
+            // exist without a session behind it - and it is the same evidence
+            // releaseUnobservedCover() acts on. A list that cannot be read proves nothing either
+            // way and leaves the decision standing; so does a list that still has something in it.
+            if (sTapSuppressed) {
+                List<MediaController> sessions = activeSessions();
+                if (sessions != null && sessions.isEmpty()) {
+                    sTapSuppressed = false;
+                    Xp.log(TAG + "no session left: the tapped-away cover is forgotten");
+                }
+            }
             if (sCoverMode) {
                 Xp.log(TAG + "media card dismissed, leaving cover mode");
                 setCoverEnabled(false, true);
