@@ -86,6 +86,7 @@
     <string name="credits_liquid_glass">The lens, the inner shadow and the vibrancy behind the liquid glass</string>
     <string name="credits_markdown_css">How the release notes are typeset</string>
     <string name="credits_hyperchanger">Lifting the depth, saved-lock-screen, clock colon and global-theme glass restrictions</string>
+    <string name="credits_hypertweak">Hiding the lock screen\'s fingerprint print and its animation</string>
     <string name="credits_amll">How the lock screen lyrics move</string>
     <string name="credits_amll_db">Where the word-by-word lyrics come from</string>
     <string name="credits_accompanist">Parses TTML, LRC, YRC and KRC lyrics</string>

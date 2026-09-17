@@ -992,6 +992,10 @@ public class Main extends XposedModule {
         // drawables, and MiuiGxzwIconView holds the static print underneath. Hiding either one
         // alone leaves the other on screen.
         //
+        // The split is HyperTweak's, read off https://github.com/TakeKazeX/HyperTweak: which of
+        // these draws what, and that hiding one of the two is not enough. What this phone needed
+        // on top of that was measured here rather than taken from anyone - see CLS_FOD_ANIM_VIEW.
+        //
         // Both install whatever the setting says and read the flag per call, so the switch takes
         // effect on the next draw rather than on the next SystemUI restart. And both are on
         // their own terms: a build that renamed one still gets the other.

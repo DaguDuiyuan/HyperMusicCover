@@ -86,6 +86,7 @@
     <string name="credits_liquid_glass">液态玻璃的透镜、内阴影和鲜艳度</string>
     <string name="credits_markdown_css">更新日志的排版样式</string>
     <string name="credits_hyperchanger">解除景深限制、锁屏搭配数量上限、时钟冒号、全局主题下的柔光玻璃</string>
+    <string name="credits_hypertweak">隐藏锁屏指纹图案和指纹动画的做法</string>
     <string name="credits_amll">锁屏歌词的动画手感</string>
     <string name="credits_amll_db">逐字歌词的主要来源</string>
     <string name="credits_accompanist">解析 TTML、LRC、YRC、KRC 四种歌词</string>

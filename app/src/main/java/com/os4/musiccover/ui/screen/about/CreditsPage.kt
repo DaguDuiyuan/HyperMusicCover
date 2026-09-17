@@ -71,6 +71,11 @@ fun CreditsPageContent(
             "https://github.com/ColdP/HyperChanger",
         ),
         Credit(
+            "HyperTweak",
+            stringResource(R.string.credits_hypertweak),
+            "https://github.com/TakeKazeX/HyperTweak",
+        ),
+        Credit(
             "AMLL",
             stringResource(R.string.credits_amll),
             "https://github.com/amll-dev/applemusic-like-lyrics",
