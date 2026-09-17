@@ -116,6 +116,16 @@ public class Main extends XposedModule {
             + "$nsslLockYPosition_delegate$lambda";
     private static final String AVOID_SUFFIX = "$$inlined$combine$1$3";
 
+    /**
+     * The charging animation HyperOS plays over the whole screen when the phone is plugged in.
+     *
+     * Matched as a package rather than by one class: the animation is one of several views in
+     * there (MiuiChargeAnimationView on this phone, TinyMiuiChargeAnimationView on a folding
+     * one's cover screen), and whichever of them is on the keyguard means the same thing to a
+     * tap. See chargeAnimUp.
+     */
+    private static final String CLS_CHARGE_PKG = "com.miui.charge.";
+
     /** SystemUI's own keyguard wallpaper manager, for the wallpaper type. See wallpaperKind(). */
     private static volatile Object sKgWallpaperMgr;
     /**
@@ -612,6 +622,15 @@ public class Main extends XposedModule {
      * centre" and hands the touch to the cover.
      */
     private static volatile boolean sGestureOnCentre;
+
+    /**
+     * Whether the gesture in flight began on the charging animation.
+     *
+     * Recorded at ACTION_DOWN for the same reason the centre is: the animation is dismissed by
+     * the very gesture that dismisses it, so by the time a held-back tap fires there is nothing
+     * left on screen to ask, and the tap would be read as one on the cover. See chargeAnimUp.
+     */
+    private static volatile boolean sGestureOnCharge;
 
     /**
      * The OEM's own miuix curves, read off AllInOneClockAnimation at runtime as
@@ -1203,6 +1222,11 @@ public class Main extends XposedModule {
                     if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
                         sGestureOnCentre = controlCenterUp();
                         if (sGestureOnCentre) cancelPendingTap("gesture began on the control centre");
+                        // The charging animation, for the same reason and at the same point: a
+                        // tap on it is what dismisses it, and asking later would be asking after
+                        // it had gone. See chargeAnimUp.
+                        sGestureOnCharge = chargeAnimUp();
+                        if (sGestureOnCharge) cancelPendingTap("gesture began on the charging animation");
                     }
                     // The one case this hook does more than watch. Returning true without
                     // proceeding takes the gesture out of the dispatch entirely, which is the
@@ -1218,6 +1242,33 @@ public class Main extends XposedModule {
             Xp.log(TAG + "lock screen tap hooked");
         } catch (Throwable t) {
             Xp.log(TAG + "lock screen tap hook failed: " + t);
+        }
+
+        // The charging animation going up and coming down, recorded rather than guessed at.
+        //
+        // This is not what holds the tap back - chargeAnimUp reads the live tree and would go on
+        // working with this hook missing entirely. It is the evidence for it: `op chargeanim`
+        // prints one line per attach and detach with the tree as it was at that instant, which
+        // is what tells "the walk finds the view" from "the walk is looking at the wrong root",
+        // and what puts a number on how long a tap is held off for.
+        try {
+            Class<?> chargeAnim = Xp.findClass(
+                    CLS_CHARGE_PKG + "container.MiuiChargeAnimationView", cl);
+            // After the call, not before: the point of the snapshot is what the tree looks like
+            // with the animation in it, and addChargeView is what puts it there.
+            Xp.hookAll(chargeAnim, "addChargeView", chain -> {
+                Object result = chain.proceed();
+                noteChargeAnim(true, chain.getThisObject());
+                return result;
+            });
+            Xp.hookAll(chargeAnim, "removeChargeView", chain -> {
+                Object result = chain.proceed();
+                noteChargeAnim(false, chain.getThisObject());
+                return result;
+            });
+            Xp.log(TAG + "charging animation hooked");
+        } catch (Throwable t) {
+            Xp.log(TAG + "charging animation hook failed: " + t);
         }
 
         // The notification shade's cover background. Its hooks and logic are ShadeLayer's own.
@@ -1967,6 +2018,8 @@ public class Main extends XposedModule {
                         dumpClockViewTypes();
                     } else if ("notif".equals(op)) {
                         dumpNotifState();
+                    } else if ("chargeanim".equals(op)) {
+                        setResultData(chargeAnimReport());
                     } else if ("views".equals(op)) {
                         dumpViewTree(i.getBooleanExtra("root", false));
                     } else if ("shadecfg".equals(op)) {
@@ -7314,7 +7367,7 @@ public class Main extends XposedModule {
         int action = ev.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
             boolean onCard = wantsArtTap() && screenOn() && keyguardShowing() && onKeyguardNow()
-                    && !bouncerUp() && !sGestureOnCentre;
+                    && !bouncerUp() && !sGestureOnCentre && !sGestureOnCharge;
             sArtSwallow = onCard && artRectContains(ev.getRawX(), ev.getRawY());
             if (sArtSwallow) {
                 sArtDownAt = android.os.SystemClock.uptimeMillis();
@@ -7464,6 +7517,124 @@ public class Main extends XposedModule {
         if (!(content instanceof ViewGroup)) return false;
         ViewGroup g = (ViewGroup) content;
         return g.getChildCount() > 0 && g.getChildAt(0).isShown();
+    }
+
+    /**
+     * Whether the charging animation is on the lock screen.
+     *
+     * HyperOS plays a full-screen animation when the phone is plugged in, and it does not take
+     * the touch: it is a FrameLayout whose own click handling covers a fraction of its area, so
+     * a DOWN anywhere else falls through to the shade window underneath and the lock screen's
+     * own tap - ours - fires with the animation still on screen. Tapping to dismiss it then
+     * toggles the cover as well.
+     *
+     * It is read off the live tree rather than tracked with a flag of our own. The animation view
+     * is added straight to the keyguard's root view by MiuiChargeAnimationView.addChargeView and
+     * taken out again by removeChargeView when it ends or the screen wakes, so the tree is the
+     * one place that cannot go stale - a flag set by a hook would stay set for the rest of the
+     * session if the build took the view out some other way, and every tap on the cover would be
+     * dead. This way a build that renames the class answers "no" and leaves the tap exactly as
+     * it was, which is the same bargain bouncerUp and controlCenterUp make.
+     */
+    private static boolean chargeAnimUp() {
+        View v = sContainer;
+        if (v == null) return false;
+        View root = v.getRootView();
+        return root != null && chargeAnimIn(root, 0);
+    }
+
+    /**
+     * The walk above. Depth-bounded because the animation is added to the window root itself -
+     * it is a child of the root, or at most a couple of levels down - and this runs on every
+     * touch the lock screen sees.
+     */
+    private static boolean chargeAnimIn(View v, int depth) {
+        // isShown rather than the class alone: it is what "and the user can see it" means, and
+        // the point of the guard is what is on the screen, not what is attached to the window.
+        if (v.getClass().getName().startsWith(CLS_CHARGE_PKG) && v.isShown()) return true;
+        if (depth >= 3 || !(v instanceof ViewGroup)) return false;
+        ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            if (chargeAnimIn(g.getChildAt(i), depth + 1)) return true;
+        }
+        return false;
+    }
+
+    // ---- the charging animation's own comings and goings, for `op chargeanim`
+
+    /** The last few attach/detach events, oldest first. */
+    private static final java.util.ArrayDeque<String> sChargeTrail = new java.util.ArrayDeque<>();
+    /** When the animation last went up, or 0 when it is not up. */
+    private static long sChargeUpAt;
+    /** How long the last one stayed up, for the line that records it going down. */
+    private static long sChargeUpFor;
+
+    private static void noteChargeAnim(boolean up, Object self) {
+        try {
+            long now = android.os.SystemClock.uptimeMillis();
+            if (up) {
+                sChargeUpAt = now;
+            } else if (sChargeUpAt != 0L) {
+                sChargeUpFor = now - sChargeUpAt;
+                sChargeUpAt = 0L;
+            }
+            View view = self instanceof View ? (View) self : null;
+            View root = sContainer == null ? null : sContainer.getRootView();
+            String line = (up ? "up" : "down") + " @" + now
+                    + " walk=" + chargeAnimUp()
+                    + " view=" + (view == null ? "?"
+                            : view.getClass().getSimpleName() + (view.isShown() ? " shown" : " hidden"))
+                    + " root=" + (root == null ? "no keyguard" : root.getClass().getSimpleName())
+                    + " kids=[" + childNames(root) + "]"
+                    + (up ? "" : " stayed=" + sChargeUpFor + "ms");
+            synchronized (sChargeTrail) {
+                sChargeTrail.addLast(line);
+                while (sChargeTrail.size() > 8) sChargeTrail.removeFirst();
+            }
+        } catch (Throwable t) {
+            Xp.log(TAG + "charge trail failed: " + t);
+        }
+    }
+
+    /** The children of a view by class name, a "!" marking the ones that are not shown. */
+    private static String childNames(View v) {
+        if (!(v instanceof ViewGroup)) return "-";
+        ViewGroup g = (ViewGroup) v;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (i > 0) sb.append(',');
+            sb.append(c.getClass().getSimpleName());
+            if (!c.isShown()) sb.append('!');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * What a tap on the cover is reading right now, and what the animation has been doing.
+     *
+     * Answered through the ordered broadcast rather than the log, which is the channel that
+     * works on this build - see the note on the app's own dump.
+     */
+    private static String chargeAnimReport() {
+        StringBuilder sb = new StringBuilder("chargeAnimUp=" + chargeAnimUp()
+                + (sChargeUpAt == 0L ? "" : " (up since " + sChargeUpAt + "ms)"));
+        synchronized (sChargeTrail) {
+            for (String line : sChargeTrail) sb.append('\n').append(line);
+        }
+        View root = sContainer == null ? null : sContainer.getRootView();
+        sb.append("\nroot=").append(root == null ? "no keyguard" : root.getClass().getName());
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                sb.append("\n  ").append(i).append(' ').append(c.getClass().getName())
+                        .append(" vis=").append(c.getVisibility())
+                        .append(" alpha=").append(c.getAlpha())
+                        .append(c.isShown() ? " shown" : " hidden");
+            }
+        }
+        return sb.toString();
     }
 
     /**
@@ -8388,6 +8559,7 @@ public class Main extends XposedModule {
                 : !c.isShown() ? "the clock container is hidden"
                 : bouncerUp() ? "the bouncer is up"
                 : controlCenterUp() ? "the control centre is up"
+                : chargeAnimUp() ? "the charging animation is up"
                 : !sCardKnown ? "the card is not known"
                 : !sCardShowing ? "no track on the card"
                 : null;
@@ -8416,9 +8588,10 @@ public class Main extends XposedModule {
      */
     private static void armLockTap(final float y) {
         if (!sTapToggle) return;
-        // Decided at the DOWN, because by the time this runs the centre may have closed under
-        // the guard in onLockTap - see the dispatch hook for the full account.
-        if (sGestureOnCentre) return;
+        // Decided at the DOWN, because by the time this runs the centre - or the charging
+        // animation - may have closed under the guard in onLockTap. See the dispatch hook for
+        // the full account.
+        if (sGestureOnCentre || sGestureOnCharge) return;
         flushPendingTap();
         Runnable r = new Runnable() {
             @Override
@@ -8478,6 +8651,10 @@ public class Main extends XposedModule {
         // The control centre covers the same region without hiding the clock, so none of the
         // guards above see it: a tap aimed at a quick toggle must not toggle the cover.
         if (controlCenterUp()) return;
+        // And the charging animation, which is a full-screen view over the same region. This is
+        // the second half of the pair - a tap that began before the animation was up is caught
+        // here, one that began under it was caught at the DOWN.
+        if (chargeAnimUp()) return;
         // Nothing to toggle without music: the card is the switch, and this only chooses
         // whether the cover follows it.
         if (!sCardKnown || !sCardShowing) return;
