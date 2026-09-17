@@ -34,6 +34,20 @@ final class LockLyrics {
     /** The user's switch. Off by default: it fetches from the network inside SystemUI. */
     static volatile boolean sEnabled;
 
+    /**
+     * Whether the lock screen's two-finger tap has taken the lyrics away for this look.
+     *
+     * A view of the switch, not the switch. The setting above is what the user asked for and
+     * what the state file holds; this says only that one lock screen is showing the cover
+     * instead, so a tap costs the lyrics until the next look and never the setting itself.
+     *
+     * It is cleared when the switch is set - off and on again brings them back rather than
+     * returning to a hidden lock screen - and when cover mode comes up, because a tap is an
+     * answer about the lock screen it was made on. Written by setEnabled and toggleByTap and
+     * nowhere else; Main reads it, never writes it.
+     */
+    static volatile boolean sTapHidden;
+
     private static String sKey = "";
     private static List<LyricLine> sLines = Collections.emptyList();
     private static int sVersion;
@@ -134,9 +148,17 @@ final class LockLyrics {
         return sLines;
     }
 
+    /**
+     * Whether the lyrics are wanted at all: the switch says so, and no tap has taken them away.
+     * A demo asks for them itself, whatever the switch says.
+     */
+    private static boolean wanted() {
+        return sEnabled && !sTapHidden || sDemo;
+    }
+
     /** Whether the view belongs in the keyguard right now. */
     static boolean wantsAttached() {
-        return (sEnabled || sDemo) && Main.coverModeOn();
+        return wanted() && Main.coverModeOn();
     }
 
     /**
@@ -359,16 +381,62 @@ final class LockLyrics {
         if (v != null) v.kick();
     }
 
+    /** The app's switch. The setting: it is written to the state file and the app reads it back. */
     static void setEnabled(boolean on, String key, MediaController c) {
         sEnabled = on;
+        // The switch is the master, so it takes the tap's answer with it. Switching the lyrics
+        // off and on again brings them back; without this, turning them on while a previous tap
+        // had hidden them would leave the lock screen on the cover with the switch saying on.
+        sTapHidden = false;
         Xp.log(TAG + "lyrics " + (on ? "on" : "off"));
+        show(on, key, c, "switched off");
+    }
+
+    /**
+     * The lock screen's two-finger tap: the cover and the lyrics, swapped for this look at the
+     * lock screen and nothing else. The switch and the file it is written to are not touched -
+     * writing them was the old behaviour, and it meant a tap that was not meant left the lyrics
+     * off the next time the phone was locked, which reads as the setting turning itself off.
+     *
+     * With the switch off the tap does nothing at all rather than turning the lyrics on: that
+     * would be the lock screen writing the app's setting, which is what it no longer does.
+     */
+    static void toggleByTap(String key, MediaController c) {
+        if (!sEnabled) return;
+        sTapHidden = !sTapHidden;
+        Xp.log(TAG + "two-finger tap: lyrics " + (sTapHidden ? "hidden" : "shown"));
+        show(!sTapHidden, key, c, "hidden by the two-finger tap");
+    }
+
+    /**
+     * Cover mode has come up again. The tap's answer was about the lock screen it was made on -
+     * hiding the cover's lyrics is not a decision about every lock screen after it - so it is
+     * dropped here and the switch speaks for the new one.
+     *
+     * The lines are asked for again as well. Hiding dropped them, and with the track key
+     * unchanged nothing else would look them up until the next song, which would leave the
+     * lyrics off every lock screen until then.
+     */
+    static void newLook(String key, MediaController c) {
+        if (!sTapHidden) return;
+        sTapHidden = false;
+        Xp.log(TAG + "a new lock screen: back to the switch");
+        show(true, key, c, "shown again");
+    }
+
+    /**
+     * The show/hide half, shared by the switch and the tap; they differ only in whether the
+     * answer is written down. Off is where the two part company in the log: the reason says
+     * which of them did it and one of them is a setting.
+     */
+    private static void show(boolean on, String key, MediaController c, String why) {
         if (on) {
             sKey = "";
             onTrack(key, c);
         } else if (!sDemo) {
             sGen++;
             sLoading = false;
-            setLines(Collections.<LyricLine>emptyList(), "switched off");
+            setLines(Collections.<LyricLine>emptyList(), why);
         }
         refresh();
     }
@@ -422,7 +490,8 @@ final class LockLyrics {
         LyricView v = sView;
         View c = Main.sContainer;
         View card = card();
-        return "enabled=" + sEnabled + " demo=" + sDemo + " key=" + sKey + " lines=" + sLines.size()
+        return "enabled=" + sEnabled + " tap=" + (sTapHidden ? "hidden" : "shown")
+                + " demo=" + sDemo + " key=" + sKey + " lines=" + sLines.size()
                 + " (" + sWhy + ") src=" + srcName(sSource)
                 + " sessionHasLyric=" + LyricSource.hasLyricInfo(sController)
                 + " pos=" + positionMs() + " playing=" + playing()
@@ -453,7 +522,7 @@ final class LockLyrics {
             sBlurSent = Boolean.FALSE;
             return;
         }
-        boolean on = sEnabled || sDemo;
+        boolean on = wanted();
         boolean want = on && (!sLines.isEmpty() || (sLoading && Boolean.TRUE.equals(sBlurSent)));
         if (sBlurSent != null && sBlurSent == want) return;
         sBlurSent = want;

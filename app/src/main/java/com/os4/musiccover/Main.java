@@ -1844,7 +1844,8 @@ public class Main extends XposedModule {
                                 + " maxPointersSeen=" + sTwoMaxPointers + " trail=" + sTwoTrail
                                 + " lastTwoTrail=" + sTwoTrailLast + " cancelled=" + sTwoCancelled
                                 + " last=" + sTwoWhy
-                                + " lyrics=" + LockLyrics.sEnabled);
+                                + " lyrics=" + LockLyrics.sEnabled
+                                + " tap=" + (LockLyrics.sTapHidden ? "hidden" : "shown"));
                     } else if ("lyricstate".equals(op)) {
                         String st = LockLyrics.describe();
                         Xp.log(TAG + "lyrics: " + st);
@@ -6428,6 +6429,10 @@ public class Main extends XposedModule {
         armTransitionTrace("entering cover mode");
         // Whatever the user decided about the last song does not carry into this one.
         sTapSuppressed = false;
+        // Nor does a two-finger tap: it hides the lyrics for the lock screen it was made on,
+        // and this is a new one. Before the lyric state below is read, since that read decides
+        // whether the entry brings the thumbnail back.
+        LockLyrics.newLook(sTrackKey, sWatched);
         setDepthHidden(true);
         // Start the card where the OEM has it when animating, so the thumbnail fades out across
         // the clock's own frames instead of blinking away before the clock has begun to move.
@@ -8547,9 +8552,13 @@ public class Main extends XposedModule {
     }
 
     /**
-     * Switches the lyrics on or off, under the same guards as the cover's own tap: only the lock
-     * screen itself, not the bouncer, the control centre or a shade pulled down over an unlocked
-     * phone, and only while a track is on the card - there is nothing to show without one.
+     * Swaps the cover and the lyrics on the lock screen, under the same guards as the cover's
+     * own tap: only the lock screen itself, not the bouncer, the control centre or a shade
+     * pulled down over an unlocked phone, and only while a track is on the card - there is
+     * nothing to show without one.
+     *
+     * It is a view and not a setting: the app's switch and the state file are left alone, and
+     * with the switch off the tap does nothing at all. See LockLyrics.toggleByTap.
      */
     private static void onTwoFingerTap() {
         View c = sContainer;
@@ -8567,15 +8576,19 @@ public class Main extends XposedModule {
             sTwoWhy = "blocked: " + no;
             return;
         }
-        boolean on = !LockLyrics.sEnabled;
+        if (!LockLyrics.sEnabled) {
+            // Nothing on the lock screen to switch. Answering the gesture by bringing the
+            // lyrics back would be writing the app's setting from here, which is the whole of
+            // what this gesture stopped doing.
+            sTwoWhy = "blocked: the lyrics switch is off";
+            return;
+        }
         long t0 = android.os.SystemClock.uptimeMillis();
-        LockLyrics.setEnabled(on, sTrackKey, sWatched);
-        saveState();
+        LockLyrics.toggleByTap(sTrackKey, sWatched);
         sTwoFired++;
-        // How long the switch held the touch up for: the stutter on switching was reported here.
-        sTwoWhy = "lyrics " + (on ? "on" : "off") + " in "
+        // How long the swap took. Nothing is written down, so this is its whole cost.
+        sTwoWhy = "lyrics " + (LockLyrics.sTapHidden ? "hidden" : "shown") + " in "
                 + (android.os.SystemClock.uptimeMillis() - t0) + "ms";
-        Xp.log(TAG + "two-finger tap: lyrics " + (on ? "on" : "off"));
     }
 
     /**
