@@ -87,6 +87,18 @@ public class Main extends XposedModule {
     private static final String CLS_FOD_ICON =
             "com.miui.keyguard.biometrics.fod.MiuiGxzwIconView";
     /**
+     * The view the frames are painted INTO, and the one that actually carries the print.
+     *
+     * Measured, not assumed: on this phone the icon view above is 206x206 with its alpha at zero
+     * and the print is still on screen, while this one sits visible at full alpha in the
+     * `gxzw_anim` window. The frame animation is how it is normally fed - which is why
+     * substituting the frames hides the print once the animation has run - but the first
+     * keyguard of a SystemUI start paints it without the animation ever being asked, and that
+     * paint is the one nothing was intercepting.
+     */
+    private static final String CLS_FOD_ANIM_VIEW =
+            "com.miui.keyguard.biometrics.fod.MiuiGxzwAnimationView";
+    /**
      * Where the lock screen's notification stack is allowed to end.
      *
      * SystemUI computes that bound in KeyguardPanelViewController.nsslLockYPosition, a StateFlow
@@ -895,10 +907,16 @@ public class Main extends XposedModule {
         // Both install whatever the setting says and read the flag per call, so the switch takes
         // effect on the next draw rather than on the next SystemUI restart. And both are on
         // their own terms: a build that renamed one still gets the other.
+        //
+        // Per call is not by itself enough, because the first call can come before the module
+        // has read its settings at all - see peekHideFp, which is what both of them start with.
         try {
             Class<?> anim = Xp.findClass(CLS_FOD_ANIM, cl);
             Xp.hookAll(anim, "draw", chain -> {
                 Object[] args = chain.getArgs().toArray();
+                // The print's own window is painted before the keyguard's clock container
+                // attaches, so the setting has to be fetched here rather than waited for.
+                peekHideFp();
                 // draw(int resId) is the frame. Any other overload is not ours to touch, which
                 // the argument check below says without having to name the signature.
                 if (sHideFp && args.length == 1 && args[0] instanceof Integer
@@ -921,6 +939,9 @@ public class Main extends XposedModule {
                 Object result = chain.proceed();
                 try {
                     View v = (View) chain.getThisObject();
+                    // Built before the keyguard attaches on the same builds the ring is, and
+                    // this is the one chance to dim it before it is ever seen.
+                    peekHideFp();
                     sFodIcons.put(v, Boolean.TRUE);
                     v.setAlpha(sHideFp ? 0f : 1f);
                 } catch (Throwable ignored) {
@@ -928,9 +949,50 @@ public class Main extends XposedModule {
                 }
                 return result;
             });
+            // And the paint itself, where the build declares one. This view paints nothing on
+            // the phone this was measured on - its alpha sits at zero with the print still on
+            // screen - but on a build where it is the painter, a frame it never draws cannot be
+            // brought back by anything that happens between frames, which the alpha above can.
+            for (String name : new String[] {"onDraw", "draw"}) {
+                try {
+                    Xp.hookAll(iconCls, name, chain -> {
+                        peekHideFp();
+                        if (sHideFp) return null;
+                        return chain.proceed();
+                    });
+                    break;
+                } catch (Throwable ignored) {
+                    // Not declared here; try the other name.
+                }
+            }
             Xp.log(TAG + "fingerprint icon hooked");
         } catch (Throwable t) {
             Xp.log(TAG + "fingerprint icon hook failed, the static print will stay: " + t);
+        }
+
+        // The view the print is actually painted on. Its own hook because it is its own class
+        // and its own failure: the frame substitution above covers it only once the animation
+        // has run, and the first keyguard after a SystemUI start paints without it.
+        try {
+            Class<?> animView = Xp.findClass(CLS_FOD_ANIM_VIEW, cl);
+            int hooked = 0;
+            for (String name : new String[] {"onDraw", "draw", "dispatchDraw"}) {
+                try {
+                    Xp.hookAll(animView, name, chain -> {
+                        peekHideFp();
+                        // Painting nothing, rather than dimming: the alpha on this view is the
+                        // OEM's to animate, and a frame it never paints cannot be animated back.
+                        if (sHideFp) return null;
+                        return chain.proceed();
+                    });
+                    hooked++;
+                } catch (Throwable ignored) {
+                    // Not declared on this build; the others still stand.
+                }
+            }
+            Xp.log(TAG + "fingerprint print view hooked, " + hooked + " of its paint methods");
+        } catch (Throwable t) {
+            Xp.log(TAG + "fingerprint print view hook failed: " + t);
         }
 
         // Whether the notifications keep clear of that icon. Installed whatever the setting is,
@@ -6281,11 +6343,122 @@ public class Main extends XposedModule {
         return ring;
     }
 
+    /** Set once the state file has been consulted for sHideFp, whether or not it had a value. */
+    private static volatile boolean sHideFpPeeked;
+
+    /**
+     * Reads the fingerprint setting out of the state file before loadState() would.
+     *
+     * The print is not part of the keyguard's own tree. It lives in a window of its own -
+     * `gxzw_touch`, 206x206, the module's report names it - which SystemUI paints as the
+     * keyguard comes up, and that paint happens BEFORE KeyguardClockContainer attaches. Since
+     * attaching is what gives the module a context, and the context is what lets it read the
+     * state file, the first frame of the print was always decided with the setting still at its
+     * default. The hook let it through, the window was never asked to draw again for as long as
+     * the keyguard stayed up, and the print sat there for the whole session - which is what
+     * "restarting SystemUI turns the hiding off until you lock the phone a second time" was.
+     *
+     * Only this one key, and only until the real load has happened: the rest of the file belongs
+     * to loadState, which applies values through setters that want a built keyguard. A file
+     * caught mid-write costs the key its default for this one read, the same exposure loadState
+     * has always had.
+     */
+    private static void peekHideFp() {
+        if (sHideFpPeeked || sAppCtx != null) return;
+        sHideFpPeeked = true;
+        try {
+            // Reflection because ActivityThread is not in the SDK to compile against. This is
+            // the process's own Application - there is no other context to be had this early,
+            // and the hooks that call this run on SystemUI's main thread, where it is set.
+            Context c = (Context) Class.forName("android.app.ActivityThread")
+                    .getMethod("currentApplication").invoke(null);
+            if (c == null) {
+                // Nothing to read it with yet; the next draw tries again.
+                sHideFpPeeked = false;
+                return;
+            }
+            java.io.File f = new java.io.File(c.getFilesDir(), STATE_FILE);
+            if (!f.exists()) return;
+            byte[] buf = new byte[(int) f.length()];
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            int n = in.read(buf);
+            in.close();
+            for (String line : new String(buf, 0, Math.max(0, n)).split("\n")) {
+                if (line.startsWith("hidefp=")) {
+                    sHideFp = "1".equals(line.substring(7).trim());
+                    Xp.log(TAG + "fingerprint setting read early: hide=" + sHideFp);
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            Xp.log(TAG + "reading the fingerprint setting early failed: " + t);
+        }
+    }
+
+    /**
+     * The root view of every window that belongs to the print, through WindowManagerGlobal.
+     *
+     * These windows are not in the keyguard's tree - `gxzw_touch` holds the print and
+     * `gxzw_anim` the ring and the "try again" tip - so there is no way to them from a view we
+     * were handed. Matched by window name, which is the OEM's and has been stable, and the
+     * result is used for nothing but finding the icon views inside.
+     */
+    private static java.util.List<View> fodWindowRoots() {
+        java.util.List<View> out = new java.util.ArrayList<>();
+        try {
+            Class<?> wmg = Class.forName("android.view.WindowManagerGlobal");
+            Object g = wmg.getMethod("getInstance").invoke(null);
+            String[] names = (String[]) wmg.getMethod("getViewRootNames").invoke(g);
+            java.lang.reflect.Method getRoot = wmg.getMethod("getRootView", String.class);
+            for (String name : names) {
+                if (name == null || !name.toLowerCase(java.util.Locale.ROOT).contains("gxzw")) {
+                    continue;
+                }
+                View v = (View) getRoot.invoke(g, name);
+                if (v != null) out.add(v);
+            }
+        } catch (Throwable t) {
+            Xp.log(TAG + "the fingerprint windows could not be read: " + t);
+        }
+        return out;
+    }
+
+    /**
+     * Takes in any icon view the constructor hook never saw.
+     *
+     * On this phone it never sees any: the view on screen is a MiuiGxzwIconView by the name we
+     * hook, yet no construction of it is ever intercepted, so the alpha the hook exists to set
+     * was being applied to an empty list. Found by walking the print's own windows instead, and
+     * put in the same map, so the setting's switch reaches them like any other.
+     *
+     * Only views that name themselves an icon: the ring and the "try again" tip share those
+     * windows and neither is the print.
+     */
+    private static void adoptFodIcons() {
+        for (View root : fodWindowRoots()) adoptFodIcons(root, 0);
+    }
+
+    private static void adoptFodIcons(View v, int depth) {
+        if (v == null || depth > 6) return;
+        // Both painters: the icon view and the one the frames land on. The tip view in the same
+        // window is neither, and keeps its "try again" to itself.
+        String name = v.getClass().getName();
+        if (name.endsWith("IconView") || name.equals(CLS_FOD_ANIM_VIEW)) {
+            sFodIcons.put(v, Boolean.TRUE);
+            return;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) adoptFodIcons(g.getChildAt(i), depth + 1);
+        }
+    }
+
     /**
      * Applies the current setting to every icon view still alive. Runs on the main thread: the
      * receiver has no handler of its own, so it is already there.
      */
     private static void applyHideFp() {
+        adoptFodIcons();
         float alpha = sHideFp ? 0f : 1f;
         java.util.List<View> views;
         synchronized (sFodIcons) {
