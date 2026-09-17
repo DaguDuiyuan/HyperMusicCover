@@ -110,7 +110,6 @@
     <string name="home_status_active">模块已激活</string>
     <string name="home_status_inactive">模块未激活</string>
     <string name="home_status_inactive_hint">请在 LSPosed 中启用并重启系统界面</string>
-    <string name="home_device_info">设备信息</string>
     <string name="home_device_name">设备名称</string>
     <string name="home_device_model">设备型号</string>
     <string name="home_hyperos_version">HyperOS 版本</string>
