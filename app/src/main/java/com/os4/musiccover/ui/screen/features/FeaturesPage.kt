@@ -152,7 +152,10 @@ internal fun CoverPageView(
     // Bumped when a switch changes the card, to re-take the picture without waiting for the tick.
     var shotNonce by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(refreshKey) { module = ModuleBridge.query(context) }
+    // Re-asked until it answers: this screen is reached straight after "重启全部作用域" as often
+    // as not, and a single query then lands before SystemUI has a receiver - leaving every
+    // control greyed out and every value at its default for as long as the screen stays open.
+    LaunchedEffect(refreshKey) { module = ModuleBridge.queryAlive(context) }
     // The pictures are asked for on their own and polled rather than fetched once: skipping a
     // track with this page open would otherwise leave the preview showing the previous album,
     // and the card's seek bar would sit still. The poll stays small because the module answers

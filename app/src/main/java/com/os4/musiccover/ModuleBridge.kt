@@ -238,6 +238,32 @@ object ModuleBridge {
     suspend fun query(context: Context): State = fromBundle(ask(context, "query"))
 
     /**
+     * The same question, asked again until it is answered.
+     *
+     * One query is a 1.5s shot at a process that may be on its way up. "重启全部作用域" kills
+     * SystemUI, and the module's receiver is not registered until the keyguard's clock container
+     * attaches - seconds later, and not at all until the keyguard is built. A screen that asks
+     * once and keeps the answer therefore shows a DEAD module for as long as it stays open, with
+     * every value on it drawn from a default rather than from a setting, and the settings the
+     * user then appears to change go nowhere.
+     *
+     * Widening gaps and then it gives up: "the module is not installed" has to stay a state this
+     * settles into, not a poll that runs for as long as the screen is open.
+     */
+    suspend fun queryAlive(context: Context): State {
+        var state = query(context)
+        for (gap in RETRY_GAPS_MS) {
+            if (state.alive) return state
+            kotlinx.coroutines.delay(gap)
+            state = query(context)
+        }
+        return state
+    }
+
+    /** The waits between [queryAlive]'s attempts. Each attempt itself costs up to the timeout. */
+    private val RETRY_GAPS_MS = longArrayOf(1000L, 2000L, 4000L, 8000L)
+
+    /**
      * The module's account of where it put the clock, as text.
      *
      * For a lock screen that is wrong on someone else's phone and right on ours: every number
