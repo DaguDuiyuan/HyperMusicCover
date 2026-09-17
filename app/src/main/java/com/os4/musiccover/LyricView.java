@@ -169,6 +169,20 @@ final class LyricView extends View {
     private static final float TAU_SHOW = 0.18f;
     /** Out faster than in: the clock starts growing into the lyrics' space at once. */
     private static final float TAU_HIDE = 0.06f;
+    /**
+     * How far the lyrics float up into place as they appear, and back down as they leave.
+     *
+     * A wake already moves them: the band is measured from the clock's live ink, so on the way
+     * in from the AOD they ride the collapse down into place. A two-finger switch has no such
+     * movement behind it - cover mode is already on and the clock is already small - so the
+     * lyrics simply materialised where they were going to be. This gives the switch the same
+     * arrival, and the same departure in reverse.
+     *
+     * Driven by `show` rather than by a timer of its own, so the movement and the fade are the
+     * same event: in on TAU_SHOW, out on TAU_HIDE, and an arrival interrupted half way turns
+     * around from where it is instead of from the far end.
+     */
+    private static final float FLOAT_DP = 26f;
     /** A gap between lines at least this long gets the interlude dots. */
     private static final int LULL_MS = 4000;
 
@@ -1035,7 +1049,11 @@ final class LyricView extends View {
         if (show <= 0.003f || lines.isEmpty() || focus < 0 || main.length != lines.size()) return;
         float bandH = bandBottom - bandTop;
         if (bandH <= 0f) return;
-        float anchor = bandTop + ANCHOR * bandH;
+        // The float, added to the anchor so the lines, their dots and their edge fades all move
+        // as one block: a line's alpha is taken from its own position against the band's edges,
+        // and offsetting the canvas instead would have left those alphas describing where the
+        // line was going to be rather than where it is.
+        float anchor = bandTop + ANCHOR * bandH + (1f - show) * FLOAT_DP * density;
         float side = SIDE_DP * density;
         float fade = Math.min(EDGE_FADE_DP * density, bandH / 3f);
         int n = lines.size();
