@@ -135,11 +135,15 @@
     <string name="card_title_tap">Tap the title to pause</string>
     <string name="lock_lyrics">Lock screen lyrics</string>
     <string name="lock_lyrics_summary">Shows lyrics between the clock and the card in cover mode. A two-finger tap switches between the cover and the lyrics</string>
-    <string name="lyrics_provider_title_missing">Please install LyricInfo</string>
-    <string name="lyrics_provider_title_idle">LyricInfo is installed</string>
+    <!-- Three states rather than two; see the default strings for what they mean. -->
+    <string name="lyrics_provider_title_missing">LyricInfo is not installed</string>
+    <string name="lyrics_provider_missing">Lyrics may be wrong or missing. Please do not report problems caused by leaving it out.</string>
+    <string name="lyrics_provider_title_inactive">LyricInfo is installed but not working</string>
+    <string name="lyrics_provider_inactive">Check its scope in LSPosed: the module has to be enabled, with your player ticked, then restart the system UI</string>
+    <string name="lyrics_provider_title_ready">LyricInfo is installed</string>
+    <string name="lyrics_provider_ready">Apps outside its scope can still fail to match.</string>
     <string name="lyrics_provider_got_it">Got it</string>
-    <string name="lyrics_provider_missing">Without it, fetching lyrics may fail.</string>
-    <string name="lyrics_provider_idle">In LSPosed, check that the module is enabled and that your player is in its scope, then restart the system UI.</string>
+    <string name="lyrics_provider_got_it_wait">Got it (%1$d)</string>
     <string name="lyrics_trans">Show translations</string>
     <string name="lyrics_trans_summary">Draw each line\'s translation under it. Turned off, the lines close up rather than leaving a gap</string>
     <string name="lyrics_hdr">HDR highlight (experimental)</string>

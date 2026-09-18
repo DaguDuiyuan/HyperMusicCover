@@ -35,6 +35,7 @@ import com.os4.musiccover.ShadeActivity
 import com.os4.musiccover.ui.util.PageScaffold
 import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -426,43 +427,85 @@ private fun LyricsGroup(
             }
         }
     }
-    // Advice, not a gate, and said once. The switch works without any provider module - the
-    // lyrics are found by name over the network - so this is worth saying rather than standing
-    // in the way, and worth saying only until it has been read.
-    // Title and body together: the two cases say opposite things about whether the module is
-    // there, so they cannot share a heading - "please install it" over "it is installed" is how
-    // that reads to whoever gets the wrong one.
-    val notice = when {
-        module.sessionLyric -> null
-        providerInstalled ->
-            R.string.lyrics_provider_title_idle to R.string.lyrics_provider_idle
-        else ->
-            R.string.lyrics_provider_title_missing to R.string.lyrics_provider_missing
+    // Three states rather than two, and the difference between the last two is the one worth
+    // showing: installed is not the same question as working. LyricInfo is an LSPosed module,
+    // and one that is installed but not enabled - or enabled without the player in its scope -
+    // writes nothing while still sitting in the package list. The package manager cannot tell
+    // those apart; whether a session has carried its lyric is what does, and only the module
+    // knows that.
+    //
+    // Which player is playing is the other half of the question, and it is the half that was
+    // missing at first. A session lyric is only ever going to appear for a player LyricInfo
+    // knows (see LYRICINFO_PLAYERS); on any other one the lyrics come from the network instead
+    // and "no session lyric" is the normal state of a working phone. Reporting that as "not
+    // working" blames the module for something it never claimed to do - and it is not a corner
+    // case, it is every song on Apple Music.
+    val provider = when {
+        !providerInstalled -> ProviderNotice.Missing
+        module.sessionLyric -> ProviderNotice.Ready
+        module.player in LYRICINFO_PLAYERS -> ProviderNotice.Inactive
+        else -> ProviderNotice.Ready
     }
+    // Said twice, because once was not enough. The row standing at the top of the group is
+    // always there; this is the interruption, and it is only worth interrupting for the two
+    // states that need something done about them.
     var showNotice by remember { mutableStateOf(false) }
-    LaunchedEffect(notice, module.alive) {
+    var countdown by remember { mutableIntStateOf(PROVIDER_NOTICE_SECONDS) }
+    LaunchedEffect(provider, module.alive) {
         // Only once the module has answered: before that every field reads as its default, and
         // "no lyric has ever arrived" would be the state of a phone that had simply not been
         // asked yet.
-        if (notice != null && module.alive && !LyricsNotice.seen(context)) {
+        if (provider != ProviderNotice.Ready && module.alive && !LyricsNotice.seen(context)) {
             showNotice = true
-            LyricsNotice.markSeen(context)
+        }
+    }
+    LaunchedEffect(showNotice) {
+        if (!showNotice) return@LaunchedEffect
+        countdown = PROVIDER_NOTICE_SECONDS
+        while (countdown > 0) {
+            delay(1_000)
+            countdown--
         }
     }
     WindowDialog(
         show = showNotice,
-        title = stringResource(notice?.first ?: R.string.lyrics_provider_title_missing),
-        summary = notice?.second?.let { stringResource(it) },
-        onDismissRequest = { showNotice = false },
+        title = stringResource(provider.title),
+        summary = stringResource(provider.summary),
+        // Held for fifteen seconds, and held means held: an outside tap and the back gesture
+        // both come through here, so there is no way out of it before the button unlocks. A
+        // notice asking for a module to be installed is read by nobody if it can be flicked
+        // away, and on most phones this one has already been flicked away once.
+        onDismissRequest = {
+            if (countdown == 0) {
+                showNotice = false
+                LyricsNotice.markSeen(context)
+            }
+        },
     ) {
         val dismiss = LocalDismissState.current
         TextButton(
             modifier = Modifier.fillMaxWidth(),
-            text = stringResource(R.string.lyrics_provider_got_it),
+            text = if (countdown > 0) {
+                stringResource(R.string.lyrics_provider_got_it_wait, countdown)
+            } else {
+                stringResource(R.string.lyrics_provider_got_it)
+            },
+            enabled = countdown == 0,
             onClick = { dismiss?.invoke() },
         )
     }
     Column {
+        // The standing half of the same statement. It never goes away and it never asks to be
+        // dismissed, which is what makes it useful on the visit after the notice was flicked
+        // away - or on a phone where the module had not answered yet when the notice was due.
+        BasicComponent(
+            title = stringResource(provider.title),
+            titleColor = BasicComponentDefaults.titleColor(
+                color = if (provider.warning) MiuixTheme.colorScheme.error
+                        else MiuixTheme.colorScheme.onBackground,
+            ),
+            summary = stringResource(provider.summary),
+        )
         SwitchPreference(
             title = stringResource(R.string.lock_lyrics),
             summary = stringResource(R.string.lock_lyrics_summary),
@@ -698,7 +741,61 @@ private val LYRIC_PROVIDERS = listOf(
 )
 
 /**
- * Remembers that the lyric-provider advice has been read.
+ * The players LyricInfo can write for, read out of its own APK's dex.
+ *
+ * It hooks a player's internals and republishes what it finds as `lyricInfo` on the media
+ * session, so it only covers the players it was written for - and Apple Music is not one of
+ * them. That is what the lyrics state on this page turns on: whether a session carries a lyric
+ * says nothing about the module unless the player on screen is one the module claims.
+ *
+ * From `pm path com.lidesheng.lyricinfo`, pulled and grepped out of `classes.dex`; the vendor
+ * class names around them (`com.salt.music.service.MusicController`,
+ * `com.luna.biz.playing.player.remote.control.*`) are the hook targets themselves. Both
+ * soda-music names are here because the app has shipped under both - `com.luna.music` and
+ * `com.ikunshare.music.mobile`.
+ */
+private val LYRICINFO_PLAYERS = setOf(
+    "com.netease.cloudmusic",
+    "com.tencent.qqmusic",
+    "com.kugou.android",
+    "com.miui.player",
+    "com.salt.music",
+    "com.luna.music",
+    "com.ikunshare.music.mobile",
+    "com.hihonor.cloudmusic",
+)
+
+/** How long the provider notice holds its own dismiss button, in seconds. */
+private const val PROVIDER_NOTICE_SECONDS = 15
+
+/**
+ * What the page says about the lyric provider module.
+ *
+ * Three states rather than two, because "installed" is not the question that matters: LyricInfo
+ * is an LSPosed module, and one that is installed but not enabled - or enabled without the
+ * player in its scope - writes nothing while still sitting in the package list. Both of the
+ * first two are asking for something to be done, which is what [warning] is for; the third is
+ * only saying what the module does and does not cover.
+ */
+private enum class ProviderNotice(
+    val title: Int,
+    val summary: Int,
+    val warning: Boolean,
+) {
+    /** Not in the package list at all. */
+    Missing(R.string.lyrics_provider_title_missing, R.string.lyrics_provider_missing, true),
+    /** Installed, but no session has carried its lyric since SystemUI started. */
+    Inactive(R.string.lyrics_provider_title_inactive, R.string.lyrics_provider_inactive, true),
+    /** Installed and writing. Apps outside its scope can still miss, which is worth saying. */
+    Ready(R.string.lyrics_provider_title_ready, R.string.lyrics_provider_ready, false),
+}
+
+/**
+ * Remembers that the lyric-provider notice has been dismissed.
+ *
+ * Marked when the notice closes rather than when it opens, so a phone that was locked or a page
+ * that was left before the button unlocked has not "been told" - the fifteen seconds it holds
+ * for are the point, and cutting them short is not reading it.
  *
  * Belongs to the app rather than the module: it is about what this phone's owner has been told,
  * not about how the lock screen behaves, and it has to survive the module being restarted.
