@@ -451,12 +451,21 @@ final class LockLyrics {
      * hiding the cover's lyrics is not a decision about every lock screen after it - so it is
      * dropped here and the switch speaks for the new one.
      *
-     * The lines are asked for again as well. Hiding dropped them, and with the track key
-     * unchanged nothing else would look them up until the next song, which would leave the
+     * fromTap is the one entry that is not a new one: the user tapped the cover away and tapped
+     * it back, which is the same look seen twice rather than a new one, so the answer made about
+     * it stands. Its lines are left dropped with it - showing them again is the two-finger tap's
+     * own job, and it asks for them then.
+     *
+     * Otherwise the lines are asked for again as well. Hiding dropped them, and with the track
+     * key unchanged nothing else would look them up until the next song, which would leave the
      * lyrics off every lock screen until then.
      */
-    static void newLook(String key, MediaController c) {
+    static void newLook(String key, MediaController c, boolean fromTap) {
         if (!sTapHidden) return;
+        if (fromTap) {
+            Xp.log(TAG + "back through a tap: the lyrics stay hidden");
+            return;
+        }
         sTapHidden = false;
         Xp.log(TAG + "a new lock screen: back to the switch");
         show(true, key, c, "shown again");

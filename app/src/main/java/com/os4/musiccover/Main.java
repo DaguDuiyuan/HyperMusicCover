@@ -584,6 +584,14 @@ public class Main extends XposedModule {
      * decision that was made about a different song.
      */
     private static volatile boolean sTapSuppressed;
+    /**
+     * The tap that brought the cover back, still owed to the entry it leads to. One-shot.
+     *
+     * A tap that took the cover away and a tap that brings it back are one look at the lock
+     * screen, so the two-finger tap's answer - the lyrics hidden - stands across the pair. Every
+     * other way back into cover mode is a new look and starts from the switch.
+     */
+    private static boolean sTappedBack;
     private static GestureDetector sTapDetector;
     /** Set for the length of one gesture that started on the card's artwork and is ours. */
     private static boolean sArtSwallow;
@@ -6461,10 +6469,14 @@ public class Main extends XposedModule {
         armTransitionTrace("entering cover mode");
         // Whatever the user decided about the last song does not carry into this one.
         sTapSuppressed = false;
-        // Nor does a two-finger tap: it hides the lyrics for the lock screen it was made on,
-        // and this is a new one. Before the lyric state below is read, since that read decides
+        // One-shot: a tap-in is this look coming back, anything else is a new one. See the field.
+        boolean tappedBack = sTappedBack;
+        sTappedBack = false;
+        // Nor does a two-finger tap - but it hides the lyrics for the look it was made on, and
+        // coming back through a tap is still that look. Every other entry is a new one and goes
+        // back to the switch. Before the lyric state below is read, since that read decides
         // whether the entry brings the thumbnail back.
-        LockLyrics.newLook(sTrackKey, sWatched);
+        LockLyrics.newLook(sTrackKey, sWatched, tappedBack);
         setDepthHidden(true);
         // Start the card where the OEM has it when animating, so the thumbnail fades out across
         // the clock's own frames instead of blinking away before the clock has begun to move.
@@ -7695,6 +7707,12 @@ public class Main extends XposedModule {
      * composed: the track may well have moved on while the cover was off.
      */
     private static void enterFromTap(String why) {
+        // Read before it is cleared: with it set, the cover was taken away by a tap on this same
+        // look, so this tap is that look coming back rather than a new one. See enterCoverMode.
+        //
+        // Guarded on the two questions onMediaUpdate asks before it does anything, so a tap that
+        // leads to no entry at all cannot leave the answer standing for one made later.
+        sTappedBack = sTapSuppressed && sAuto && sCardShowing;
         sTapSuppressed = false;
         sTrackKey = "";
         Xp.log(TAG + why + ": expanding into cover mode");
