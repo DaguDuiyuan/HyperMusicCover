@@ -58,6 +58,8 @@ final class ClockCollapse {
     private static Choreographer.FrameCallback sFrame;
     /** A spring whose frames stop - the display going to doze - is landed by this instead. */
     private static final long LAND_ANYWAY_MS = 1500L;
+    /** How close the OEM's own clock has to be to the doze before the hand-over is safe. */
+    private static final float DOZE_SETTLE_PX = 3f;
 
     /** The pose on screen when the transition started. NaN top = not captured yet. */
     private static float sFromTop = Float.NaN, sFromUnit = Float.NaN, sFromDate = Float.NaN;
@@ -287,7 +289,12 @@ final class ClockCollapse {
         sGlassTo = 0f;
         sYFrom = sYTo = Float.NaN;
         sExitToAod = true;
-        sAodTop = Float.NaN;
+        // sAodTop/sAodUnit/sAodDate are deliberately NOT cleared: they hold the pose the last
+        // settled doze was drawn at, and this transition aims at it. It cannot aim at the OEM's
+        // live clock - the y has just been put back in one step, so for the first frames that is
+        // still the lock screen's clock, several hundred pixels taller than the doze. Measured
+        // on houji, 2026-09-19: the clock grew to 506px against a 404px doze and then came back
+        // down over 0.6s, which reads as the zoom running backwards.
         start(Phase.EXIT);
         Xp.log(TAG + "clock: into the AOD");
         final Choreographer.FrameCallback flight = sFrame;
@@ -874,6 +881,15 @@ final class ClockCollapse {
                     shape = Math.min(1f, sTPeak);
                 }
                 boolean done = poseDone && shapeDone;
+                // The fall into the AOD is the one transition whose destination is a remembered
+                // pose rather than the OEM's live clock (see the EXIT maths), so the spring
+                // finishing is not the same as the clock being where the hand-over needs it:
+                // landing now would clear our transforms off a clock still bigger than the one we
+                // drew. Wait until the OEM's own clock has come down to the doze. LAND_ANYWAY_MS
+                // in toAod() lands a doze that never settles.
+                if (done && sExitToAod && !Float.isNaN(sAodUnit) && !Float.isNaN(LIVE.unit)) {
+                    done = Math.abs(LIVE.unit - sAodUnit) <= DOZE_SETTLE_PX;
+                }
                 if (sPerfLastAt != 0L) sPerfGapMax = Math.max(sPerfGapMax, now - sPerfLastAt);
                 sPerfLastAt = now;
                 sPerfN++;
@@ -1240,13 +1256,16 @@ final class ClockCollapse {
         } else {
             float t = sT;
             boolean in = phase == Phase.ENTER;
-            float toTop = in ? coverTop : m.inkTop;
-            // Leaving, the size follows the OEM's own clock as its glyphs grow on their spring:
-            // one smooth curve, in the OEM's own proportions the whole way, so never wider than
-            // the clock it lands on. A width cap tried first put a kink in the growth where it
-            // started to bind (40px a frame to 14 in one frame) - the "顿" at the end.
-            float toUnit = in ? coverUnit : m.unit;
-            float toDate = in ? coverDate : m.dateTop;
+            // Leaving into the AOD, the destination is the doze that was last on screen, not the
+            // OEM's live clock - see toAod(). Leaving cover mode, it is the live clock: there is
+            // no other pose to aim at, and the size follows the OEM's own as its glyphs grow on
+            // their spring, one smooth curve in the OEM's own proportions the whole way, so never
+            // wider than the clock it lands on. A width cap tried first put a kink in the growth
+            // where it started to bind (40px a frame to 14 in one frame) - the "顿" at the end.
+            boolean doze = !in && sExitToAod && !Float.isNaN(sAodUnit);
+            float toTop = in ? coverTop : (doze ? sAodTop : m.inkTop);
+            float toUnit = in ? coverUnit : (doze ? sAodUnit : m.unit);
+            float toDate = in ? coverDate : (doze ? sAodDate : m.dateTop);
             top = sFromTop + (toTop - sFromTop) * t;
             unit = sFromUnit + (toUnit - sFromUnit) * t;
             date = Float.isNaN(sFromDate) ? toDate : sFromDate + (toDate - sFromDate) * t;
