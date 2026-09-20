@@ -38,6 +38,7 @@ import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.BasicComponentDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.SliderDefaults
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.preference.ArrowPreference
@@ -372,6 +373,11 @@ private fun ClockGroup(
             value = module.clockResponse.coerceIn(CLOCK_RESPONSE_MIN, CLOCK_RESPONSE_MAX),
             valueRange = CLOCK_RESPONSE_MIN..CLOCK_RESPONSE_MAX,
             enabled = enabled,
+            // The one detent in the app: this slider's own default, and the value every note
+            // about this transition quotes. Nothing is printed for it - the tick is the only
+            // mark, and it is there so the default can be found again without reading the
+            // number off the row.
+            detent = DEFAULT_CLOCK_RESPONSE,
             onValueChange = {
                 onChange(module.copy(clockResponse = it))
                 ModuleBridge.setClockResponse(context, it)
@@ -670,6 +676,13 @@ private const val CLOCK_RESPONSE_MIN = 0.18f
 private const val CLOCK_RESPONSE_MAX = 0.60f
 
 /**
+ * What the module ships with, and the one detent on any slider here: `EASE_COVER[1]` in Main.java,
+ * the response the cover itself moves on. Named rather than written at the call site because the
+ * detent and the default have to be the same number for either of them to be worth anything.
+ */
+private const val DEFAULT_CLOCK_RESPONSE = 0.38f
+
+/**
  * A slider with its current value printed opposite the title. Without the number there is no way
  * to tell where you have dragged to, which matters here because these values get compared against
  * ones written down in the notes.
@@ -677,6 +690,12 @@ private const val CLOCK_RESPONSE_MAX = 0.60f
  * Shared with ShadePage, which is why it is `internal` rather than private to this file: both
  * pages adjust module settings the same way, and a second slider that looked almost the same was
  * the first thing a reviewer noticed.
+ *
+ * [detent] is a single value on the track that ticks as it is passed - the app's only one, and it
+ * exists because a slider whose default is one number among many is otherwise impossible to find
+ * again by hand. It is miuix's own key point rather than a comparison of this frame's value
+ * against the last, so the tick is the library's and behaves the way every other miuix slider's
+ * does.
  */
 @Composable
 internal fun ValueSlider(
@@ -685,6 +704,7 @@ internal fun ValueSlider(
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     enabled: Boolean,
+    detent: Float? = null,
     label: (Float) -> String = ::format,
     onValueChange: (Float) -> Unit,
 ) {
@@ -710,6 +730,17 @@ internal fun ValueSlider(
             onValueChange = onValueChange,
             valueRange = valueRange,
             enabled = enabled,
+            // Step is what makes a key point produce a tick at all; the default effect only fires
+            // at the two ends of the track (SliderHapticEffect.Edge), and those ends keep firing
+            // either way, because the edge haptic is played before the key point is looked at.
+            hapticEffect = if (detent != null) SliderDefaults.SliderHapticEffect.Step
+                           else SliderDefaults.DefaultHapticEffect,
+            keyPoints = detent?.let { listOf(it) },
+            // The library's magnet would pull the value onto the key point from 2% of the range
+            // away, which is a snap rather than a tick, and it would take the values just either
+            // side of the detent out of what this slider can be set to. Off, deliberately: the
+            // detent is there to be felt, not to stop the finger short.
+            magnetThreshold = 0f,
         )
     }
 }
