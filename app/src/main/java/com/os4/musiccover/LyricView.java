@@ -436,7 +436,7 @@ final class LyricView extends View {
         float dt = lastStep == 0L ? 0f : Math.min(0.05f, (now - lastStep) / 1000f);
         lastStep = now;
 
-        boolean changed = false;
+        boolean changed = followAodDim();
         int why = 0;
         // Not before the first layout: a width of zero would wrap every line a character a row.
         // Leaving, the lines are frozen like the band below: switching the lyrics off empties
@@ -751,9 +751,51 @@ final class LyricView extends View {
         return v;
     }
 
+    /** keyguard_info_layer, the view the full AOD dims - the one the lyrics take their alpha from. */
+    private View dimSource;
+
+    /**
+     * The alpha the full always-on display is currently dimming the keyguard by.
+     *
+     * The OEM applies that dim to six views by name and this one is not among them: the lyrics
+     * live in `keyguard_foreground_layer`, a sibling of `keyguard_info_layer` under the same
+     * `constraintLayout` (KeyguardPanelViewController 1239-1262 and 5665-5674). Left alone they
+     * would sit at full brightness over a screen that had just darkened itself.
+     *
+     * Read from that sibling rather than from a constant so the 500ms descent is followed frame
+     * for frame, and looked up again whenever it is not attached - the keyguard is rebuilt.
+     */
+    private float dimTarget() {
+        if (!LockLyrics.inHeldAod()) return 1f;
+        View s = dimSource;
+        if (s == null || !s.isAttachedToWindow()) {
+            View root = getRootView();
+            int id = getContext().getResources()
+                    .getIdentifier("keyguard_info_layer", "id", "com.android.systemui");
+            s = id == 0 || root == null ? null : root.findViewById(id);
+            dimSource = s;
+        }
+        return s == null ? 1f : s.getTransitionAlpha();
+    }
+
+    /** @return whether it moved, so a dim of the keyguard keeps this view asking for frames */
+    private boolean followAodDim() {
+        float want = dimTarget();
+        if (getTransitionAlpha() == want) return false;
+        setTransitionAlpha(want);
+        return true;
+    }
+
     private boolean needsFrames() {
         if (!isAttachedToWindow()) return false;
         if (show != showTarget()) return true;
+        // The keyguard dimming around us is a movement like any other, and so is the keyguard
+        // coming back: without this the loop would stop the moment the words settled and leave
+        // the lyrics at whatever alpha the AOD had put them at - dimmed on a lit screen, or at
+        // full brightness on one that has just dimmed itself. Asked in both directions, because
+        // dimTarget() is 1 outside the AOD and the frame that wakes the keyguard may change
+        // nothing else.
+        if (getTransitionAlpha() != dimTarget()) return true;
         // The block sliding to a new centre is a movement like any other, and the slowest one
         // here: without this the loop would stop the moment the springs settled and leave the
         // correction half way.

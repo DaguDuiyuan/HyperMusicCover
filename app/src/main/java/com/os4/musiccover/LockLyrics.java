@@ -209,9 +209,28 @@ final class LockLyrics {
      * now, so through the flight they follow it down instead.
      */
     static boolean wantsShown() {
-        if (!wantsAttached() || !Main.screenOnCached()) return false;
+        if (!wantsAttached()) return false;
         ClockCollapse.Phase p = ClockCollapse.phase();
-        return p == ClockCollapse.Phase.ON || p == ClockCollapse.Phase.ENTER;
+        if (p == ClockCollapse.Phase.ON || p == ClockCollapse.Phase.ENTER) {
+            return Main.screenOnCached();
+        }
+        return inHeldAod();
+    }
+
+    /**
+     * The full-screen always-on display that kept cover mode's clock - the lock screen, dimmed.
+     *
+     * The lyrics belong to it for the same reason the clock does: it is this lock screen being
+     * shown, not the OEM's own doze, and both the clock's ink and the media card are still laid
+     * out for the lyrics to sit between. Only that one doze: with the clock handed back to the
+     * OEM there is nothing measured to sit under, and `inkBottomOnScreen()` says NaN.
+     *
+     * No switch of its own. The one that decides this is "keep the small clock in the full-screen
+     * AOD", which is what makes the doze this lock screen; where that is on, carrying the lyrics
+     * through is what the lock screen was showing.
+     */
+    static boolean inHeldAod() {
+        return ClockCollapse.aodHeld() && !Main.screenOnCached();
     }
 
     /** The media card, looked up again only when the one we hold has left the window. */
@@ -547,7 +566,9 @@ final class LockLyrics {
                 // answer it holds and when it was decided, so the two readings side by side say
                 // whether a switch was lost on the way rather than guessing at the cover.
                 + " blur=" + (blurWanted() ? "on" : "off") + "@" + (sBlurSent >>> 1)
-                + " phase=" + ClockCollapse.phase() + " cardP=" + Main.cardProgress()
+                + " phase=" + ClockCollapse.phase()
+                + " inAod=" + inHeldAod() + " held=" + ClockCollapse.aodHeld()
+                + " cardP=" + Main.cardProgress()
                 + " container=" + (c == null ? "none" : c.getAlpha() + "/shown=" + c.isShown())
                 + " card=" + (card == null ? "none" : "shown=" + card.isShown())
                 + " clockBottom=" + ClockCollapse.inkBottomOnScreen()
@@ -643,7 +664,7 @@ final class LockLyrics {
             long delay = 1000L;
             holdScreen(v);
             updateHdr();
-            if (Main.screenOnCached() && !sLines.isEmpty()) {
+            if ((Main.screenOnCached() || inHeldAod()) && !sLines.isEmpty()) {
                 readState(false);
                 v.kick();
                 if (playing()) {
@@ -670,7 +691,13 @@ final class LockLyrics {
      * lock outranks a user activity timeout. Nothing is faked as a touch.
      */
     private static void holdScreen(LyricView v) {
-        boolean want = sKeepOn && wantsShown() && !sLines.isEmpty() && playing();
+        // NOT in a doze, and this is the one that has to be got right: setKeepScreenOn on this
+        // view is the whole mechanism above, and the view is in the SHADE window - so asking for
+        // it while the display is dozing takes a screen wake lock and pulls the phone out of the
+        // AOD at full brightness. Called from the tick, which never stops, so this would have
+        // fired within a second of the screen going off.
+        boolean want = sKeepOn && wantsShown() && !inHeldAod()
+                && !sLines.isEmpty() && playing();
         if (want == sHolding) return;
         sHolding = want;
         v.setKeepScreenOn(want);
@@ -684,7 +711,10 @@ final class LockLyrics {
 
     /** Whether the singing words should be drawn in HDR right now. */
     static boolean hdrWanted() {
-        return sHdr && sGlowing && wantsShown() && !sLines.isEmpty();
+        // Never in a doze: the colour mode is the whole shade window's and the headroom is 4x,
+        // which is the opposite of what a display that has just dimmed itself wants. The glow
+        // that arms this needs the lyrics on screen, so without this the AOD would ask for HDR.
+        return sHdr && sGlowing && wantsShown() && !inHeldAod() && !sLines.isEmpty();
     }
 
     private static boolean sGlowing;

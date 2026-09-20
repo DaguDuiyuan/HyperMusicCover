@@ -155,11 +155,17 @@ final class ClockCollapse {
 
     /**
      * Where the clock ends on screen this frame, for the lyrics to sit under. NaN while nothing
-     * of ours is on the clock - the AOD's full clock is the OEM's, and nothing may sit under it.
+     * of ours is on the clock.
+     *
+     * A held doze is the exception, and the reason this is a policy rather than a reading: the
+     * pose there is re-applied every doze frame by writePose(), so sInkBottom is as fresh as it
+     * is on the lock screen. What used to keep the lyrics out of the AOD - "the AOD's full clock
+     * is the OEM's, and nothing may sit under it" - is exactly what the setting turns off.
      */
     static float inkBottomOnScreen() {
         Phase p = sPhase;
-        return p == Phase.OFF || p == Phase.AOD ? Float.NaN : sInkBottom;
+        if (p == Phase.AOD) return sAodHeld ? sInkBottom : Float.NaN;
+        return p == Phase.OFF ? Float.NaN : sInkBottom;
     }
 
     static Phase phase() {
