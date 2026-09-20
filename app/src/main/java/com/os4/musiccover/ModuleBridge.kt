@@ -79,6 +79,11 @@ object ModuleBridge {
         val mcArtInLyrics: Boolean = false,
         val mcTitleTap: Boolean = false,
         val hideFingerprint: Boolean = false,
+        /**
+         * Keep cover mode's small clock in the full-screen always-on display, instead of letting
+         * it grow back into the OEM's own AOD clock.
+         */
+        val aodSmall: Boolean = false,
         /** Draw the big clock's colon on the styles that drop it. */
         val forceColon: Boolean = false,
         /** Lock screen lyrics, between the collapsed clock and the card. */
@@ -210,6 +215,9 @@ object ModuleBridge {
     // wire would make moving it later a protocol change.
     fun setHideFingerprint(context: Context, on: Boolean) =
         send(context, "hidefp") { putExtra("on", on) }
+
+    fun setAodSmall(context: Context, on: Boolean) =
+        send(context, "aodclock") { putExtra("small", on) }
 
     fun setForceColon(context: Context, on: Boolean) =
         send(context, "colon") { putExtra("on", on) }
@@ -467,6 +475,7 @@ object ModuleBridge {
             mcArtInLyrics = b.getBoolean("mclyricart", false),
             mcTitleTap = b.getBoolean("mctap", false),
             hideFingerprint = b.getBoolean("hidefp", false),
+            aodSmall = b.getBoolean("aodsmall", false),
             forceColon = b.getBoolean("colon", false),
             lyrics = b.getBoolean("lyrics", false),
             lyricsKeepOn = b.getBoolean("lyrickeep", false),

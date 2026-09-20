@@ -351,6 +351,20 @@ private fun ClockGroup(
                 ModuleBridge.setClockSize(context, size)
             },
         )
+        // Not a cover setting either, in the same way the colon switch below is not: it is about
+        // the clock the lock screen is showing when the display goes off. About the FULL-SCREEN
+        // always-on display only, which is why the summary names it - the plain AOD is left as the
+        // system draws it. Nothing to re-apply: the module reads it when the screen falls asleep.
+        SwitchPreference(
+            title = stringResource(R.string.clock_aod_small),
+            summary = stringResource(R.string.clock_aod_small_summary),
+            checked = module.aodSmall,
+            enabled = enabled,
+            onCheckedChange = {
+                onChange(module.copy(aodSmall = it))
+                ModuleBridge.setAodSmall(context, it)
+            },
+        )
         // The spring the whole transition runs on. The number is miuix's response time in
         // seconds and it is not flipped, because the label is a description of feel rather than
         // of the unit: dragging right slows the spring down, and a slower spring with the same

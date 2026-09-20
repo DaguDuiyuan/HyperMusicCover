@@ -482,6 +482,20 @@ public class Main extends XposedModule {
      */
     private static volatile boolean sHideFp;
     /**
+     * Keep cover mode's small clock in the always-on display instead of handing it back to the
+     * OEM's, which is what it does by default.
+     *
+     * About the FULL-SCREEN AOD only - the one that shows the whole lock screen, dimmed. That is
+     * the mode the user asked for, and the one where the OEM itself is trying to show the lock
+     * screen's clock (see ClockCollapse.sAodHeld). The plain linkage AOD and the classic plugin
+     * AOD are left exactly as they were.
+     *
+     * One setting for both views of the lock screen: the lyrics are a layer over cover mode
+     * rather than a mode of their own, so "cover" and "lyrics" have no separate AOD to disagree
+     * about.
+     */
+    static volatile boolean sAodSmall;
+    /**
      * Whether the wallpaper process is sizing the keyguard texture to the SCREEN rather than to
      * the wallpaper file, which is its default and is the same switch as WallpaperProbe.sTexFit
      * on the other side. Kept here for one reason: while that is on, the re-fit below - which
@@ -1529,6 +1543,7 @@ public class Main extends XposedModule {
                     + ShadeLayer.dumpCfg()
                     + "\nfadewp=" + (sFadeWp ? 1 : 0)
                     + "\nhidefp=" + (sHideFp ? 1 : 0)
+                    + "\naodsmall=" + (sAodSmall ? 1 : 0)
                     + "\ncolon=" + (HyperTweaks.sForceColon ? 1 : 0)
                     + "\nlyrics=" + (LockLyrics.sEnabled ? 1 : 0)
                     + "\nlyrickeep=" + (LockLyrics.sKeepOn ? 1 : 0)
@@ -1616,6 +1631,7 @@ public class Main extends XposedModule {
                         else if ("tap".equals(k)) sTapToggle = "1".equals(v);
                         else if ("fadewp".equals(k)) sFadeWp = "1".equals(v);
                         else if ("hidefp".equals(k)) sHideFp = "1".equals(v);
+                        else if ("aodsmall".equals(k)) sAodSmall = "1".equals(v);
                         else if ("colon".equals(k)) HyperTweaks.sForceColon = "1".equals(v);
                         else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
                         else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
@@ -1951,6 +1967,16 @@ public class Main extends XposedModule {
                         saveState();
                         Xp.log(TAG + "hide fingerprint " + (sHideFp ? "on" : "off"));
                         applyHideFp();
+                    } else if ("aodclock".equals(op)) {
+                        sAodSmall = i.getBooleanExtra("small", !sAodSmall);
+                        saveState();
+                        // The pose a held doze was drawn at is the small one, and the fall into an
+                        // OEM doze aims at that remembered pose rather than at the live clock. Left
+                        // standing, turning the setting off would still land on the small clock
+                        // once. Dropped, it is the state a doze that never settled is in.
+                        ClockCollapse.forgetAodPose();
+                        Xp.log(TAG + "AOD keeps the small clock " + (sAodSmall ? "on" : "off")
+                                + " (full-screen AOD now: " + fullAodOn() + ")");
                     } else if ("fpavoid".equals(op)) {
                         sFpAvoid = i.getIntExtra("mode", 0);
                         saveState();
@@ -2098,6 +2124,7 @@ public class Main extends XposedModule {
                         out.putBoolean("tap", sTapToggle);
                         out.putBoolean("fadewp", sFadeWp);
                         out.putBoolean("hidefp", sHideFp);
+                        out.putBoolean("aodsmall", sAodSmall);
                         out.putBoolean("colon", HyperTweaks.sForceColon);
                         out.putBoolean("lyrics", LockLyrics.sEnabled);
                         out.putBoolean("lyrickeep", LockLyrics.sKeepOn);
@@ -8949,6 +8976,85 @@ public class Main extends XposedModule {
     }
 
     /**
+     * Whether the always-on display in play is the FULL-SCREEN one - the whole lock screen shown
+     * dimmed - as opposed to the plain one that shows only a clock.
+     *
+     * The OEM's own answer rather than the secure setting: `fullAodEnable()` ANDs the user's
+     * switch with the device support, the doze master switch and whether the current wallpaper and
+     * template allow it, and any one of those going off is a phone whose AOD is not this mode. The
+     * settings are the fallback for a build whose interfaces-manager does not have the impl.
+     *
+     * Asked once per sleep, from ClockCollapse.keepInAod(), so the reflection is not on any
+     * per-frame path.
+     */
+    static boolean fullAodOn() {
+        View c = sContainer;
+        if (c != null) {
+            try {
+                ClassLoader cl = c.getClass().getClassLoader();
+                Class<?> iface = Class.forName(
+                        "com.miui.interfaces.keyguard.IMiuiFullAodManager", false, cl);
+                Class<?> iim = Class.forName(
+                        "com.miui.systemui.interfacesmanager.InterfacesImplManager", false, cl);
+                Object mgr = iim.getMethod("getImpl", Class.class).invoke(null, iface);
+                Object on = mgr == null ? null : Xp.callMethod(mgr, "fullAodEnable");
+                if (on instanceof Boolean) return (Boolean) on;
+            } catch (Throwable t) {
+                // Not logged on every call: a build without the impl would fill the log with it,
+                // and the fallback below answers the same question.
+            }
+        }
+        try {
+            // The current user's copy, which is the one the keyguard is drawn for.
+            android.content.ContentResolver cr = sAppCtx.getContentResolver();
+            return android.provider.Settings.Secure.getInt(cr, "full_screen_aod_on", 0) == 1
+                    && android.provider.Settings.Secure.getInt(cr, "full_screen_aod_support", 0) == 1;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** The clock's glass as the screen fell asleep: r, g, b and the fill. See captureAodGlass. */
+    private static final float[] sAodCoverGlass = new float[4];
+    private static volatile boolean sAodCoverGlassSet;
+
+    /**
+     * Remembers what colour and fill the clock's glyphs were in as the screen falls asleep, for a
+     * doze that keeps the cover's clock.
+     *
+     * The doze repaints those glyphs from the wallpaper's palette, and in cover mode the wallpaper
+     * is the album art - which is what turned the always-on clock gold, and is why an ordinary
+     * doze is held at a neutral instead. A held doze is meant to be the lock screen's clock
+     * carried into sleep, so it is held at the lock screen's own values. Called from toAod(), the
+     * last moment they are still the lock screen's: the doze inks its own over them a frame later.
+     */
+    static void captureAodGlass() {
+        sAodCoverGlassSet = false;
+        for (View root : clockRoots()) {
+            for (String id : new String[]{"hour_view", "minute_view", "colon_view"}) {
+                try {
+                    int rid = root.getContext().getResources()
+                            .getIdentifier(id, "id", "com.android.systemui");
+                    View t = rid == 0 ? null : root.findViewById(rid);
+                    if (t == null || t.getVisibility() != View.VISIBLE) continue;
+                    float[] g = (float[]) Xp.getObjectField(t, "glassData");
+                    if (g == null || g.length < 42) continue;
+                    sAodCoverGlass[0] = g[11];
+                    sAodCoverGlass[1] = g[12];
+                    sAodCoverGlass[2] = g[13];
+                    // glassData[36] carries the fill our own morph last pushed, which is what the
+                    // lock screen is drawn with - not sAppliedGlassV, which is the value asked
+                    // for rather than the one that landed.
+                    sAodCoverGlass[3] = g[36];
+                    sAodCoverGlassSet = true;
+                    return;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /**
      * Holds the always-on clock's glyphs at the neutral they were first inked in.
      *
      * The colour lives in `glassData[11..13]` and is uploaded from the view's own field when the
@@ -8967,6 +9073,12 @@ public class Main extends XposedModule {
      */
     static boolean holdAodColour() {
         if (!sCoverMode || sScreenOn) return false;
+        // A doze that kept the cover's clock is showing the LOCK SCREEN's clock, so it holds the
+        // colour and the fill the lock screen had rather than the doze's neutral. Same mechanism
+        // and same reason - the palette pass repaints a doze whether the clock is ours or the
+        // OEM's, so the field has to be asserted either way; only the value differs. Read at the
+        // moment of sleep, before the doze had inked anything with its own palette.
+        boolean cover = ClockCollapse.aodHeld() && sAodCoverGlassSet;
         boolean wrote = false;
         for (View root : clockRoots()) {
             for (String id : new String[]{"hour_view", "minute_view", "colon_view"}) {
@@ -8977,6 +9089,21 @@ public class Main extends XposedModule {
                     if (t == null || t.getVisibility() != View.VISIBLE) continue;
                     float[] g = (float[]) Xp.getObjectField(t, "glassData");
                     if (g == null || g.length < 42) continue;
+                    if (cover) {
+                        if (g[11] != sAodCoverGlass[0] || g[12] != sAodCoverGlass[1]
+                                || g[13] != sAodCoverGlass[2]) {
+                            g[11] = sAodCoverGlass[0];
+                            g[12] = sAodCoverGlass[1];
+                            g[13] = sAodCoverGlass[2];
+                            wrote = true;
+                        }
+                        if (g[36] != sAodCoverGlass[3]) {
+                            g[36] = sAodCoverGlass[3];
+                            wrote = true;
+                        }
+                        if (wrote) t.invalidate();
+                        continue;
+                    }
                     if (Float.isNaN(sAodGrey)) {
                         sAodGrey = luminance(g[11], g[12], g[13]);
                     }
@@ -9001,7 +9128,7 @@ public class Main extends XposedModule {
                 }
             }
         }
-        if (wrote) pushGlassFill(1f);
+        if (wrote) pushGlassFill(cover ? sAodCoverGlass[3] : 1f);
         return wrote;
     }
 
@@ -9022,7 +9149,24 @@ public class Main extends XposedModule {
         boolean sbDone = false;
         StringBuilder sb = new StringBuilder("aodprobe cover=" + sCoverMode
                 + " screenOn=" + sScreenOn + " grey=" + sAodGrey
+                + " aodsmall=" + sAodSmall + " fullAod=" + fullAodOn()
+                + " coverGlass=" + (sAodCoverGlassSet
+                        ? sAodCoverGlass[0] + "," + sAodCoverGlass[1] + ","
+                          + sAodCoverGlass[2] + " fill=" + sAodCoverGlass[3]
+                        : "none")
                 + " guardHits=" + sMiGlassGuardHits);
+        // The clock's own state, because the whole setting is about where it is drawn: phase,
+        // the pose being held, and the two the AOD recorded for the wake to start from.
+        sb.append(" | ").append(ClockCollapse.describe());
+        View date = visibleDate();
+        sb.append(" | date=").append(date == null ? "none" : geomOf(date));
+        for (View root : clockRoots()) {
+            View g = clockTarget(root);
+            if (g == null) continue;
+            sb.append(" | tg scale=").append(g.getScaleY()).append(" ty=")
+              .append(g.getTranslationY()).append(" vis=").append(g.getVisibility());
+            break;
+        }
         for (View root : clockRoots()) {
             for (String id : new String[]{"hour_view", "minute_view", "colon_view"}) {
                 try {

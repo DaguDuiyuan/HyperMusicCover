@@ -22,6 +22,8 @@
     <string name="clock_height_summary">Moves the date and clock together; positive is down</string>
     <string name="clock_size">Clock size</string>
     <string name="clock_size_summary">Relative to the full clock; 100% means no shrink</string>
+    <string name="clock_aod_small">Keep the small clock in the full-screen AOD</string>
+    <string name="clock_aod_small_summary">Hold this clock when the display sleeps instead of growing back to the system\'s own (needs full-screen always-on display enabled in Settings)</string>
     <string name="clock_response">Scale animation damping</string>
     <string name="clock_response_summary">0.38 by default, higher feels more damped</string>
     <string name="clock_glass">Glass strength</string>

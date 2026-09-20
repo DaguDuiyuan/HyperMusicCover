@@ -47,6 +47,47 @@ final class ClockCollapse {
     private static boolean sExitToAod;
 
     /**
+     * This doze is keeping the cover's clock rather than the OEM's.
+     *
+     * Latched when the screen falls asleep, not read live: the setting can be flipped from adb
+     * at any moment, and a doze that changed its mind half way through would leave the clock
+     * scaled onto one layout and posed for another.
+     *
+     * Off, sleeping hands the clock back - toAod() springs it to whatever the doze lays out and
+     * land() clears our transforms. On, and only under the full-screen AOD (the mode the setting
+     * is about; see Main.sAodSmall), the pose on screen at the moment of sleep is remembered and
+     * re-applied every frame of the doze, so nothing moves at all.
+     *
+     * The OEM is trying to do the same thing - AllInOneClockAnimation.updateFullAodAnimState()
+     * copies the LOCK SCREEN's timeHeight and clockTranslationY into all_in_one_full_aod - but by
+     * the time it does, the clock it copies is the one we have already handed back, which is the
+     * full-size one. The small clock has to stay ours.
+     */
+    private static boolean sAodHeld;
+
+    /**
+     * The OEM's y as it was held when the screen fell asleep, put back on it for the length of a
+     * held doze.
+     *
+     * Not the same value as the doze would pick for itself, and that is the point: y is what the
+     * OEM's VARIABLE FONT is sized and weighted by, so a clock drawn from the doze's own y is a
+     * clock drawn in a lighter, wider face - and scaling that down to the cover's 174px gives
+     * hairlines where the lock screen has strokes. Holding the lock screen's y again makes the
+     * OEM redraw its glyphs in the face it was already using, and the same scale then lands on
+     * the same picture. updateClockComponentStyle re-copies lockScreenStyle into the full-AOD
+     * state on every restyle, so the AOD's own animation picks the change up as well.
+     *
+     * The y is still released for the hand-over itself - doAnimationToAod reads the clock's
+     * translation and posts it to the AOD plugin - and put back on the first doze frame after.
+     */
+    private static float sAodHoldY = Float.NaN;
+
+    /** Whether the doze about to start should keep our clock. Read once, at the start of sleep. */
+    private static boolean keepInAod() {
+        return Main.sAodSmall && Main.fullAodOn();
+    }
+
+    /**
      * Set on the binder thread the moment the keyguard hears it is waking, before the OEM lays
      * the lock screen out again. The pre-draw of the first lock screen frame reads it, so the
      * entry starts in the same frame and no frame of the OEM's own full-size clock is drawn.
@@ -123,6 +164,11 @@ final class ClockCollapse {
 
     static Phase phase() {
         return sPhase;
+    }
+
+    /** Whether this doze is keeping the cover's clock - for Main.holdAodColour(). */
+    static boolean aodHeld() {
+        return sAodHeld;
     }
 
     /** Anything of ours on the clock that belongs to the lock screen being up. */
@@ -253,6 +299,13 @@ final class ClockCollapse {
         boolean flying = (sPhase == Phase.ENTER || sPhase == Phase.ON) && Main.sContainer != null;
         if (flying) captureFrom();
         Float held = Main.sHoldY;
+        // Kept for a held doze to put back on, one frame later - see sAodHoldY. ONLY when there
+        // is one: the screen falling asleep calls this twice (KeyguardService's sleep hook, then
+        // doAnimationToAod), the first call is the one that finds the hold and lets go of it, and
+        // the second would otherwise write NaN over the lock screen's y - which is the single
+        // value a held doze cannot be without. Measured: heldY=NaN and a doze clock drawn at
+        // 1168px scaled to 0.149, against the lock screen's 337px at 0.518.
+        if (held != null) sAodHoldY = held;
         float natural = naturalY();
         if (held != null) {
             Main.sHoldY = null;
@@ -260,10 +313,12 @@ final class ClockCollapse {
         }
         switch (sPhase) {
             case AOD:
+                // Already asleep. sAodHeld stands as it was latched.
                 return;
             case EXIT:
                 if (sExitToAod) return;
                 // A plain exit that was already flying: keep flying, but land in the AOD.
+                sAodHeld = false;
                 sExitToAod = true;
                 sYFrom = sYTo = Float.NaN;
                 return;
@@ -271,6 +326,7 @@ final class ClockCollapse {
                 if (!Main.coverModeOn()) return;
                 // Cover mode without our clock - unlocked, say. Nothing to walk back; watch the
                 // AOD so the wake has a start.
+                sAodHeld = false;
                 sPhase = Phase.AOD;
                 sAodTop = Float.NaN;
                 install();
@@ -280,9 +336,38 @@ final class ClockCollapse {
                 break;
         }
         if (!flying) {
+            sAodHeld = false;
             releaseNow("to AOD with no container");
             return;
         }
+        if (keepInAod()) {
+            // The full-screen AOD keeps the cover's clock, so there is nothing to travel to:
+            // sFromTop/sFromUnit/sFromDate, captured above, ARE the pose on screen and the pose
+            // this doze will keep. The transforms stay where they are - that they survive the
+            // hand-over is the whole of the setting - and frame() re-applies them off the box
+            // the doze draws, which is not the lock screen's.
+            //
+            // The OEM's y has been put back above and stays back: doAnimationToAod reads the
+            // clock's translation and posts it to the AOD plugin, and the clock is held by our
+            // own transforms on time_group, which the OEM does not read.
+            sAodHeld = true;
+            // The colour too: a held doze is showing the lock screen's clock, so it holds the
+            // lock screen's glass instead of the doze's neutral. Read here because this is the
+            // last moment it is still the lock screen's - the doze inks its own over it.
+            Main.captureAodGlass();
+            stopFrame();
+            sT = 1f;
+            sTv = 0f;
+            sExitToAod = false;
+            sPhase = Phase.AOD;
+            sGlassFrom = sGlassTo = sGlassP;
+            install();
+            Xp.log(TAG + "clock: into the AOD holding the cover pose (top="
+                    + Main.r1(sFromTop) + " unit=" + Main.r1(sFromUnit)
+                    + " date=" + Main.r1(sFromDate) + ")");
+            return;
+        }
+        sAodHeld = false;
         sCardFrom = Main.cardProgress();
         sCardTo = sCardFrom;
         sGlassFrom = sGlassP;
@@ -354,11 +439,13 @@ final class ClockCollapse {
     }
 
     static String describe() {
-        return "phase=" + sPhase + (sExitToAod ? "(to AOD)" : "") + " t=" + Main.r3(sT)
+        return "phase=" + sPhase + (sExitToAod ? "(to AOD)" : "") + (sAodHeld ? "(held)" : "")
+                + " t=" + Main.r3(sT)
                 + " waking=" + sWaking + " floor=" + Main.r1(sFloor)
                 + " y " + Main.r1(sYFrom) + "->" + Main.r1(sYTo)
                 + " card " + Main.r2(sCardFrom) + "->" + Main.r2(sCardTo)
                 + " glass " + Main.r2(sGlassFrom) + "->" + Main.r2(sGlassTo)
+                + " heldY=" + Main.r1(sAodHoldY)
                 + " from top=" + Main.r1(sFromTop) + " unit=" + Main.r1(sFromUnit)
                 + " date=" + Main.r1(sFromDate)
                 + " aod top=" + Main.r1(sAodTop) + " unit=" + Main.r1(sAodUnit);
@@ -961,6 +1048,8 @@ final class ClockCollapse {
         stopFrame();
         sPhase = Phase.OFF;
         sExitToAod = false;
+        sAodHeld = false;
+        sAodHoldY = Float.NaN;
         sT = 1f;
         sTv = 0f;
         sFromTop = Float.NaN;
@@ -1179,6 +1268,28 @@ final class ClockCollapse {
                 enter(true, true);
                 phase = sPhase;
                 if (phase != Phase.ENTER) return;
+            } else if (sAodHeld && !Float.isNaN(sFromTop) && m.unit > 0f) {
+                // Asleep with the cover's clock kept: the pose the lock screen was showing is put
+                // back on the doze's own box, and nothing else of ours is touched - no card
+                // progress, no glass morph (that one is already a no-op with the screen off), no
+                // colour band. The colour of the doze belongs to holdAodColour().
+                //
+                // Re-applied rather than left alone because the AOD does hand the clock to its own
+                // layout: updateFullAodAnimState() re-runs setAllInOneClockRectParams with the
+                // lock screen's timeWidth/timeHeight, AnimationHelper re-runs the whole AOD
+                // animation once a minute, and both move the box this maps from. The transforms
+                // themselves survive all of it - nothing in the full-AOD path writes time_group.
+                Main.holdAodColour();
+                // Back on the lock screen's squeeze, so the OEM draws its glyphs in the face the
+                // lock screen was showing rather than the doze's own - see sAodHoldY. Cheap: hold()
+                // only reaches the OEM when the value is news, so this is one notifStateChange.
+                if (!Float.isNaN(sAodHoldY)) hold(sAodHoldY);
+                writePose(m, sFromTop, sFromUnit, sFromDate, false);
+                // The wake starts from what is on screen, which is this pose.
+                sAodTop = sFromTop;
+                sAodUnit = sFromUnit;
+                sAodDate = sFromDate;
+                return;
             } else {
                 // The OEM's clock as it is. What it looks like here is the wake's start.
                 clearTransforms();
@@ -1274,10 +1385,30 @@ final class ClockCollapse {
             glass = sGlassFrom + (sGlassTo - sGlassFrom) * tc;
         }
 
+        writePose(m, top, unit, date, phase == Phase.ENTER && sGlyphTail);
+        Main.setCardProgressFrom(card);
+        sGlassP = glass;
+        Main.applyGlassMorph(glass);
+        // The colour band describes the lock screen; the AOD's layout is not that.
+        if (!(phase == Phase.EXIT && sExitToAod)) Main.updateColorBand();
+    }
+
+    /**
+     * Puts one pose on the clock: the ink top, the height of one row of digits, and the top of
+     * the date, all in screen pixels, mapped onto whatever the OEM is about to draw.
+     *
+     * The single place the clock's views are moved. The mapping is absolute rather than relative -
+     * the translation is measured from the box about to be drawn to the pose asked for - so
+     * anything the OEM does to an ancestor (its own squeeze translation, the AOD's re-layout, a
+     * Folme animator settling) is absorbed here rather than added to.
+     *
+     * @param holdWidth keep the drawn width from growing - the entry's glyph tail; see the call
+     */
+    private static void writePose(Live m, float top, float unit, float date, boolean holdWidth) {
         float scale = unit / m.unit;
         sInkBottom = top + m.box.height() * scale;
         float scaleX = scale;
-        if (phase == Phase.ENTER && sGlyphTail && m.box.width() > 0f) {
+        if (holdWidth && m.box.width() > 0f) {
             // The OEM's glyph aspect is not monotonic along the walk - measured 1.47 -> 1.68 ->
             // 1.50 while the height held - so the drawn width would swell and shrink back as the
             // clock arrives. Only the width is held to closing in. Holding it through the uniform
@@ -1312,10 +1443,18 @@ final class ClockCollapse {
             float dty = date - m.dateTop;
             if (Math.abs(m.date.getTranslationY() - dty) >= 0.25f) m.date.setTranslationY(dty);
         }
-        Main.setCardProgressFrom(card);
-        sGlassP = glass;
-        Main.applyGlassMorph(glass);
-        // The colour band describes the lock screen; the AOD's layout is not that.
-        if (!(phase == Phase.EXIT && sExitToAod)) Main.updateColorBand();
+    }
+
+    /**
+     * Drops the pose the last settled doze was drawn at.
+     *
+     * Held, that pose is the cover's small one, and the fall into an OEM doze aims at it - so a
+     * setting that has just been turned off would land on the small clock. Clearing it is the
+     * state a doze that has never settled is in, which falls back to the OEM's live clock.
+     */
+    static void forgetAodPose() {
+        sAodTop = Float.NaN;
+        sAodUnit = Float.NaN;
+        sAodDate = Float.NaN;
     }
 }

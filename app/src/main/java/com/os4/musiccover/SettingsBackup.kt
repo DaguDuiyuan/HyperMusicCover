@@ -31,6 +31,7 @@ object SettingsBackup {
     private const val KEY_CARD_ART_IN_LYRICS = "cardArtInLyrics"
     private const val KEY_CARD_TITLE_TAP = "cardTitleTap"
     private const val KEY_HIDE_FINGERPRINT = "hideFingerprint"
+    private const val KEY_AOD_SMALL = "aodSmallClock"
     private const val KEY_FORCE_COLON = "forceClockColon"
     private const val KEY_LYRICS = "lyrics"
     private const val KEY_LYRICS_KEEP_ON = "lyricsKeepOn"
@@ -56,6 +57,7 @@ object SettingsBackup {
             json.put(KEY_CARD_ART_IN_LYRICS, module.mcArtInLyrics)
             json.put(KEY_CARD_TITLE_TAP, module.mcTitleTap)
             json.put(KEY_HIDE_FINGERPRINT, module.hideFingerprint)
+            json.put(KEY_AOD_SMALL, module.aodSmall)
             json.put(KEY_FORCE_COLON, module.forceColon)
             json.put(KEY_LYRICS, module.lyrics)
             json.put(KEY_LYRICS_KEEP_ON, module.lyricsKeepOn)
@@ -109,6 +111,9 @@ object SettingsBackup {
             }
             if (obj.has(KEY_HIDE_FINGERPRINT)) {
                 ModuleBridge.setHideFingerprint(context, obj.getBoolean(KEY_HIDE_FINGERPRINT))
+            }
+            if (obj.has(KEY_AOD_SMALL)) {
+                ModuleBridge.setAodSmall(context, obj.getBoolean(KEY_AOD_SMALL))
             }
             if (obj.has(KEY_FORCE_COLON)) {
                 ModuleBridge.setForceColon(context, obj.getBoolean(KEY_FORCE_COLON))
