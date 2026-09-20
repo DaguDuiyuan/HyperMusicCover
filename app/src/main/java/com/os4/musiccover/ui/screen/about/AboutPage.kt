@@ -86,12 +86,11 @@ fun AboutPageContent(
     openLicensePage: () -> Unit,
     openCreditsPage: () -> Unit,
     isBlurEnabled: Boolean = true,
-    checkUpdate: Boolean = true,
     isCurrent: () -> Boolean = { true },
 ) {
     // Owns the check, the install and the four dialogs; see UpdateUi.kt. It has to sit above the
     // Scaffold because the dialogs open their own windows and cannot be nested in the page body.
-    val update = rememberUpdateController(isCurrent, checkUpdate)
+    val update = rememberUpdateController(isCurrent)
     val topAppBarScrollBehavior = MiuixScrollBehavior()
     val lazyListState = rememberLazyListState()
 

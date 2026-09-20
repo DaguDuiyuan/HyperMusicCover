@@ -32,9 +32,10 @@
     <string name="tab_settings">设置</string>
     <string name="tab_about">关于</string>
     <string name="settings_interface">界面</string>
+    <string name="settings_theme">主题</string>
+    <string name="settings_theme_summary">主题模式、导航栏样式与背景模糊</string>
     <string name="settings_language">语言</string>
     <string name="settings_data">数据管理</string>
-    <string name="settings_update">更新</string>
     <string name="theme_mode">主题模式</string>
     <string name="theme_system">跟随系统</string>
     <string name="theme_light">浅色</string>
@@ -59,10 +60,6 @@
     <string name="import_settings_summary">从 JSON 文件导入设置</string>
     <string name="import_success">导入成功，即将重启应用</string>
     <string name="import_failed">导入失败，文件格式不正确</string>
-    <string name="copy_report">复制诊断信息</string>
-    <string name="copy_report_summary">时钟位置不对时，先复现一次再点这里，把内容发给开发者</string>
-    <string name="copy_report_done">已复制，粘贴发给开发者即可</string>
-    <string name="copy_report_failed">模块没有回应，确认已在 LSPosed 里启用并重启过系统界面</string>
     <string name="export_success">导出成功</string>
     <string name="export_failed">导出失败</string>
     <string name="about">关于</string>
@@ -178,8 +175,6 @@
     <string name="update_percent">%1$d%%</string>
     <string name="update_downloading">正在更新</string>
     <string name="restart_scope">重启全部作用域</string>
-    <string name="check_update">检查更新</string>
-    <string name="check_update_summary">在应用启动后自动检查是否有最新版</string>
 
     <!-- The features page is a list of cards, each opening a page of its own. -->
     <string name="features_cover_title">锁屏音乐封面</string>
