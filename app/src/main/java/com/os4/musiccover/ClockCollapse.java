@@ -168,6 +168,29 @@ final class ClockCollapse {
         return p == Phase.OFF ? Float.NaN : sInkBottom;
     }
 
+    /**
+     * The bottom of everything the clock brings with it, for whoever has to fit underneath.
+     *
+     * The signature bar hangs the clock, so on a style that has one the lock lyrics have to start
+     * below it rather than be drawn through it. The bar keeps its own height - it is carried, not
+     * scaled - so what sits under the clock is the ink bottom plus the OEM's gap plus the bar.
+     *
+     * NaN wherever the ink bottom is: nothing measured, nothing to sit under.
+     */
+    static float contentBottomOnScreen() {
+        float ink = inkBottomOnScreen();
+        if (Float.isNaN(ink)) return Float.NaN;
+        float bottom = ink;
+        Live m = LIVE;
+        for (int i = 0; i < m.sigN; i++) {
+            Sig s = m.sig[i];
+            if (s.v == null) continue;
+            float b = ink + s.gap + s.v.getHeight();
+            if (b > bottom) bottom = b;
+        }
+        return bottom;
+    }
+
     static Phase phase() {
         return sPhase;
     }
@@ -1082,6 +1105,9 @@ final class ClockCollapse {
         }
         View date = Main.sDateView;
         if (date != null && date.getTranslationY() != 0f) date.setTranslationY(0f);
+        for (View v : Main.signatureViews()) {
+            if (v.getTranslationY() != 0f) v.setTranslationY(0f);
+        }
     }
 
     // ------------------------------------------------------------------ per frame
@@ -1196,7 +1222,26 @@ final class ClockCollapse {
         float dateTop;
         float dateH;
         boolean anchored;
+        Sig[] sig;
+        int sigN;
     }
+
+    /**
+     * The signature bar under the clock, as the OEM laid it out this frame.
+     *
+     * `top` is the layout position, so it says nothing about where we last put the bar, and `gap`
+     * is its distance below the clock's own ink - the OEM's own measure, read live rather than
+     * latched, so it follows whatever the OEM is doing to its clock (a squeeze, a notification
+     * arriving, a minute ticking over into a wider glyph) instead of going stale on it.
+     */
+    private static final class Sig {
+        View v;
+        float top;
+        float gap;
+    }
+
+    /** Two clock trees, so at most two bars. Reused, never reallocated per frame. */
+    private static final Sig[] SIGS = {new Sig(), new Sig()};
 
     private static final Live LIVE = new Live();
 
@@ -1232,6 +1277,21 @@ final class ClockCollapse {
         } else {
             m.dateTop = Float.NaN;
             m.dateH = 0f;
+        }
+        // The signature bar, on the styles that have one. Its distance below the clock's ink is
+        // read off where the OEM put it, so it is the OEM's own measure whatever we have done to
+        // the clock in the meantime. An empty bar is not carried: it is invisible, and the lock
+        // lyrics must not be pushed down to make room for it.
+        m.sig = SIGS;
+        m.sigN = 0;
+        for (Sig s : SIGS) s.v = null;
+        for (View v : Main.signatureViews()) {
+            if (m.sigN >= SIGS.length) break;
+            if (!Main.signatureShows(v)) continue;
+            Sig s = SIGS[m.sigN++];
+            s.v = v;
+            s.top = parentTop(v) + v.getTop();
+            s.gap = s.top - (m.inkTop + box.height());
         }
         return !(m.anchored && date == null);
     }
@@ -1448,6 +1508,23 @@ final class ClockCollapse {
                 && (m.anchored || !inside(m.date, firstTarget()))) {
             float dty = date - m.dateTop;
             if (Math.abs(m.date.getTranslationY() - dty) >= 0.25f) m.date.setTranslationY(dty);
+        }
+        // The signature bar, the same problem one rung down. all_in_one derives its topMargin from
+        // the clock's own rect - clockRect.bottom plus the gap between time and signature - and
+        // classic chains it off the digit rows, so on both it hangs the clock by a distance the
+        // OEM works out for itself. Moving the clock moves nothing of that: the bar is a sibling,
+        // not a child, so it is carried here by the same distance off the ink this pose puts on
+        // screen.
+        //
+        // The distance is the OEM's live one, which is also what makes the hand back exact: on the
+        // way out the pose is the OEM's own box, so the target comes out at the bar's own layout
+        // top and the translation lands on 0 by itself. No interpolation to keep in step with the
+        // clock's, and nothing to remember for the next entry.
+        for (int i = 0; i < m.sigN; i++) {
+            Sig s = m.sig[i];
+            if (s.v == null) continue;
+            float sty = sInkBottom + s.gap - s.top;
+            if (Math.abs(s.v.getTranslationY() - sty) >= 0.25f) s.v.setTranslationY(sty);
         }
     }
 

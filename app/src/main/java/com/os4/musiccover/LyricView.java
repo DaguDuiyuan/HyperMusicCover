@@ -1136,7 +1136,7 @@ final class LyricView extends View {
         // Two getLocationOnScreen walks a frame are not free, and this runs from the keyguard's
         // pre-draw: nothing to show, nothing to measure.
         if (lines.isEmpty() && show == 0f) return false;
-        float clock = ClockCollapse.inkBottomOnScreen();
+        float clock = ClockCollapse.contentBottomOnScreen();
         View card = LockLyrics.card();
         boolean ok = false;
         float top = bandTop, bottom = bandBottom;

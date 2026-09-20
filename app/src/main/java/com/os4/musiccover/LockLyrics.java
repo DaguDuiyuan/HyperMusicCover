@@ -571,7 +571,8 @@ final class LockLyrics {
                 + " cardP=" + Main.cardProgress()
                 + " container=" + (c == null ? "none" : c.getAlpha() + "/shown=" + c.isShown())
                 + " card=" + (card == null ? "none" : "shown=" + card.isShown())
-                + " clockBottom=" + ClockCollapse.inkBottomOnScreen()
+                + " clockBottom=" + ClockCollapse.contentBottomOnScreen()
+                + " ink=" + ClockCollapse.inkBottomOnScreen()
                 + " shown=" + wantsShown() + " tick=" + sTicking
                 + " view={" + (v == null ? "none" : v.describe()) + "}";
     }

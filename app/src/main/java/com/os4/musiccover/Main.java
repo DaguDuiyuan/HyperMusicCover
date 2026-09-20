@@ -3954,6 +3954,76 @@ public class Main extends XposedModule {
     }
 
     /**
+     * What the OEM gives the signature bar under the clock - the container, then its editor.
+     *
+     * The container is the one the OEM itself moves (see AllInOneBase), so it is tried first; the
+     * editor is only there for a build that renames the container and keeps the editor's id.
+     */
+    private static final String[] SIG_IDS = {
+            "signature_text_container", "signature_text",
+    };
+
+    /**
+     * The signature bar under the clock, at most one per clock tree.
+     *
+     * Cover mode moves the clock out from under it, and nothing in the OEM re-derives the bar's
+     * position from anything we have touched, so it is left behind. Carrying it is the same
+     * problem as the date's, and it is solved the same way: measure where the OEM put it, and
+     * translate it back to that distance from wherever the clock now is. Eleven layouts in this
+     * build carry the ids - all_in_one's three, classic's and its signature variants - and every
+     * other style has neither, so it is left alone.
+     *
+     * Sticky, for the reason the date is: a bar that alternated between candidates on consecutive
+     * frames would be re-measured every frame.
+     */
+    private static View[] sSigViews = new View[0];
+
+    static View[] signatureViews() {
+        View[] last = sSigViews;
+        if (last.length > 0) {
+            boolean ok = true;
+            for (View v : last) if (!usableDate(v)) ok = false;
+            if (ok) return last;
+        }
+        View[] roots = clockRoots();
+        java.util.ArrayList<View> found = new java.util.ArrayList<>(roots.length);
+        for (View root : roots) {
+            View v = null;
+            for (String id : SIG_IDS) {
+                View c = findClockView(root, id);
+                if (usableDate(c)) {
+                    v = c;
+                    break;
+                }
+            }
+            if (v != null && !found.contains(v)) found.add(v);
+        }
+        sSigViews = found.toArray(new View[0]);
+        return sSigViews;
+    }
+
+    /**
+     * Whether the signature bar has anything in it.
+     *
+     * The container exists on every style carrying the ids whether or not a signature was ever
+     * set, and an empty one is invisible - so carrying it would drag an empty box around and,
+     * worse, would push the lock lyrics down to make room for nothing. The bar's own text is the
+     * answer, and it is read off the already-resolved views every frame rather than folded into
+     * the lookup above: the user edits it from the OEM's clock editor, so it can go from empty to
+     * set while the lock screen is up, and the lookup is sticky by design.
+     */
+    static boolean signatureShows(View v) {
+        if (v instanceof TextView) return ((TextView) v).length() > 0;
+        if (!(v instanceof ViewGroup)) return false;
+        ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if (c.getVisibility() == View.VISIBLE && signatureShows(c)) return true;
+        }
+        return false;
+    }
+
+    /**
      * Whether the clock on screen is the one the anchored placement was measured on.
      *
      * `time_group` is all_in_one's own id - the style the date target, the gap and the
@@ -4294,6 +4364,23 @@ public class Main extends XposedModule {
               .append(" ty=").append(r1(date.getTranslationY()))
               .append(" text=\"").append(date instanceof TextView
                     ? ((TextView) date).getText() : "?").append("\"\n");
+        }
+        View[] sigs = signatureViews();
+        if (sigs.length == 0) {
+            sb.append("signature: none on this style\n");
+        } else {
+            for (View s : sigs) {
+                int[] sl = new int[2];
+                s.getLocationOnScreen(sl);
+                sb.append("signature: #").append(idOf(s)).append(' ')
+                  .append(s.getClass().getSimpleName())
+                  .append(" onScreen=").append(sl[0]).append(',').append(sl[1])
+                  .append(" top=").append(s.getTop()).append(" h=").append(s.getHeight())
+                  .append(" ty=").append(r1(s.getTranslationY()))
+                  .append(" text=").append(signatureShows(s))
+                  .append(" under=").append(r1(ClockCollapse.contentBottomOnScreen()))
+                  .append("\n");
+            }
         }
         RectF pooled = glyphBox();
         sb.append("glyphs: ").append(pooled == null ? "NOT MEASURABLE" : pooled.toString())
@@ -6677,6 +6764,7 @@ public class Main extends XposedModule {
     static void noteDateView(View date) {
         if (date == sDateView) return;
         sDateView = date;
+        sSigViews = new View[0];
         sClockTargets.clear();
         forgetClockRoots();
         forgetGlyphBox();
