@@ -5766,10 +5766,9 @@ public class Main extends XposedModule {
                 // the wallpaper. Only on a fresh push: a non-fresh one is an explicit "hand it
                 // over again" - after the wallpaper process restarted it may have nothing at all
                 // - and refusing there would leave the lock screen with no cover rather than a
-                // soft one. The track is compared by title because the two key shapes a track
-                // arrives in differ in everything else: the card's own key is pkg|song|artist,
-                // the session fallback appends the album, and bilibili rewrites the artist
-                // string when it moves to background audio. All three are one track.
+                // soft one. "The same track" is sameTrack()'s question, and it has to be asked as
+                // loosely as that: the keys one track arrives under disagree about everything but
+                // the package and the title.
                 boolean worse = fresh && art != null && sArtPrint != 0 && !stale
                         && sArtLong > 0 && sameTrack(sArtKey, sTrackKey)
                         && Math.max(art.getWidth(), art.getHeight()) < sArtLong;
@@ -8243,21 +8242,43 @@ public class Main extends XposedModule {
     }
 
     /**
-     * Whether two track keys name the same track. Only the title is compared, because that is
-     * the one field the shapes agree on: see the note in tryPushArt.
+     * Whether two track keys name the same track.
+     *
+     * The package and the title have to match outright: they are the two fields every shape of
+     * the key agrees on, and they are what actually tells two tracks apart. (The key comes in two
+     * shapes - the card's own is pkg|song|artist, the session fallback is pkg|title|artist|album -
+     * and the album field is null in one of them and not in the other, so it cannot be compared
+     * at all.)
+     *
+     * The artist is compared too, but only as far as one being the other with something appended.
+     * That is the shape the movement takes: bilibili rewrites its own artist to
+     * "...·后台听视频省流量" when the video leaves the foreground. Anything more than an appended
+     * marker is left to mean a different track, which costs nothing here - a genuinely different
+     * artist would have moved the title as well.
+     *
+     * A key too short to carry a title answers no, which leaves the plain comparison the callers
+     * have already made in charge.
      */
     private static boolean sameTrack(String a, String b) {
-        String ta = titleInKey(a), tb = titleInKey(b);
-        return !ta.isEmpty() && ta.equals(tb);
+        String pa = keyField(a, 0), pb = keyField(b, 0);
+        String ta = keyField(a, 1), tb = keyField(b, 1);
+        if (pa.isEmpty() || !pa.equals(pb)) return false;
+        if (ta.isEmpty() || !ta.equals(tb)) return false;
+        String aa = keyField(a, 2), ab = keyField(b, 2);
+        return aa.equals(ab) || aa.startsWith(ab) || ab.startsWith(aa);
     }
 
-    /** The title out of a track key: package, title, and then whatever else that shape carries. */
-    private static String titleInKey(String key) {
+    /** The nth |-separated field of a track key, or "" when the key does not reach that far. */
+    private static String keyField(String key, int n) {
         if (key == null) return "";
-        int i = key.indexOf('|');
-        if (i < 0) return "";
-        int j = key.indexOf('|', i + 1);
-        return j < 0 ? key.substring(i + 1) : key.substring(i + 1, j);
+        int from = 0;
+        for (int i = 0; i < n; i++) {
+            from = key.indexOf('|', from);
+            if (from < 0) return "";
+            from++;
+        }
+        int end = key.indexOf('|', from);
+        return end < 0 ? key.substring(from) : key.substring(from, end);
     }
 
     /** The session's track title, which is what a queue item can be matched against. */
@@ -8295,7 +8316,16 @@ public class Main extends XposedModule {
         // a card" must not mean "put the cover back".
         if (sTapSuppressed) return;
         String key = sCardKey.isEmpty() ? trackKey(sWatched) : sCardKey;
-        if (sCoverMode && key.equals(sTrackKey)) return;
+        // One track, several keys. The string itself changes under a track that has not: the
+        // card's own key is pkg|song|artist and the session fallback appends the album, so the
+        // moment the card is torn down and rebuilt - which is what a wake from the AOD is - the
+        // key loses its last field and comes back with it, twice in two frames. Bilibili rewrites
+        // the artist on top of that, appending its background-audio marker when the video leaves
+        // the foreground. Every one of those read as a track change: a fresh push, and the one
+        // that answered it was the media card's small thumbnail, so the cover came up soft on the
+        // second lock and every lock after it. Same track means same package and same title - the
+        // two fields all three shapes agree on - and then there is nothing to do here at all.
+        if (sCoverMode && (key.equals(sTrackKey) || sameTrack(key, sTrackKey))) return;
         sTrackKey = key;
         long ctNow = android.os.SystemClock.uptimeMillis();
         // Still waiting on the artwork for the previous one means this press lands on top of it:
