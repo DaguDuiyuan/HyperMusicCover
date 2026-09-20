@@ -5627,6 +5627,22 @@ public class Main extends XposedModule {
     /** What the wallpaper currently shows, coarsely, so a stale source can be recognised. */
     private static volatile int sArtPrint;
     /**
+     * The size of that push, and the track it belonged to, so a WORSE source for the same track
+     * can be refused.
+     *
+     * The fingerprint above cannot see a downgrade: the same cover at another size is a
+     * different 8x8 hash, so it reads as a new picture. Measured on bilibili, which publishes an
+     * 800x480 copy in its session while the video is in the foreground and later drops it, by
+     * which point the media card's thumbnail holds a 144x86 one - the same cover at a fifth of
+     * the width, composed into the same 1200x2608 wallpaper as an 8x upscale instead of a 1.5x
+     * one. That is a visible loss of sharpness, and it arrives as a "new track", so without this
+     * the cover gets worse while the track stays the same.
+     */
+    private static volatile int sArtW;
+    private static volatile int sArtH;
+    private static volatile int sArtLong;
+    private static volatile String sArtKey = "";
+    /**
      * Which push is the current one. The retries span a couple of seconds, so the card can be
      * dismissed - or the track changed again - while they are still running; without this, a
      * retry that finally found artwork would put the cover back after cover mode had ended.
@@ -5690,6 +5706,10 @@ public class Main extends XposedModule {
         final int gen = ++sPushGen;
         if (!on) {
             sArtPrint = 0;
+            sArtW = 0;
+            sArtH = 0;
+            sArtLong = 0;
+            sArtKey = "";
             worker().post(new Runnable() {
                 @Override
                 public void run() { pushArtToWallpaper(ctx, false, null); }
@@ -5742,7 +5762,18 @@ public class Main extends XposedModule {
                 Bitmap art = albumArt(ctx, last || allowCard, sessionBits);
                 int print = art == null ? 0 : artPrint(art);
                 boolean stale = fresh && art != null && sArtPrint != 0 && print == sArtPrint;
-                if ((art == null || stale) && !last) {
+                // The same track, and the copy being offered is smaller than the one already on
+                // the wallpaper. Only on a fresh push: a non-fresh one is an explicit "hand it
+                // over again" - after the wallpaper process restarted it may have nothing at all
+                // - and refusing there would leave the lock screen with no cover rather than a
+                // soft one. The track is compared by title because the two key shapes a track
+                // arrives in differ in everything else: the card's own key is pkg|song|artist,
+                // the session fallback appends the album, and bilibili rewrites the artist
+                // string when it moves to background audio. All three are one track.
+                boolean worse = fresh && art != null && sArtPrint != 0 && !stale
+                        && sArtLong > 0 && sameTrack(sArtKey, sTrackKey)
+                        && Math.max(art.getWidth(), art.getHeight()) < sArtLong;
+                if ((art == null || stale || worse) && !last) {
                     // 0 is "a session was there and carried no bitmap", which more tries will not
                     // change. -1 is "there was nothing to ask", which more tries might. Once the
                     // card is in it stays in, so this is worth looking at on any attempt - the
@@ -5751,7 +5782,8 @@ public class Main extends XposedModule {
                     if (bare) {
                         Xp.log(TAG + "session carries no bitmap at all, reading the card from here");
                     }
-                    Xp.log(TAG + "art " + (art == null ? "not ready" : "still the old one")
+                    Xp.log(TAG + "art " + (art == null ? "not ready"
+                                    : stale ? "still the old one" : "smaller than the one up")
                             + ", retrying (" + (attempt + 2) + "/" + ART_TRIES + ")");
                     tryPushArt(ctx, attempt + 1, fresh, gen, allowCard || bare);
                     return;
@@ -5761,10 +5793,25 @@ public class Main extends XposedModule {
                     Xp.log(TAG + "same artwork as the last track, wallpaper left alone");
                     return;
                 }
+                if (worse) {
+                    // Waiting the tries out was the point: the session's own copy is often a
+                    // moment behind the card's. It did not turn up, and the wallpaper keeps the
+                    // bigger copy it already has - which is this same track's cover.
+                    Xp.log(TAG + "art " + art.getWidth() + "x" + art.getHeight()
+                            + " is smaller than the " + sArtW + "x" + sArtH
+                            + " already up for this track, wallpaper left alone");
+                    return;
+                }
                 // Only when something is really going out. A push with no art leaves the
                 // wallpaper showing what it already showed, and recording 0 here would claim it
                 // was empty and disarm the stale-art check on the next track change.
-                if (art != null) sArtPrint = print;
+                if (art != null) {
+                    sArtPrint = print;
+                    sArtW = art.getWidth();
+                    sArtH = art.getHeight();
+                    sArtLong = Math.max(sArtW, sArtH);
+                    sArtKey = sTrackKey;
+                }
                 sCtTries = attempt + 1;
                 sCtArt = android.os.SystemClock.uptimeMillis();
                 pushArtToWallpaper(ctx, true, art);
@@ -8193,6 +8240,24 @@ public class Main extends XposedModule {
         return c.getPackageName() + "|" + md.getString(MediaMetadata.METADATA_KEY_TITLE)
                 + "|" + md.getString(MediaMetadata.METADATA_KEY_ARTIST)
                 + "|" + md.getString(MediaMetadata.METADATA_KEY_ALBUM);
+    }
+
+    /**
+     * Whether two track keys name the same track. Only the title is compared, because that is
+     * the one field the shapes agree on: see the note in tryPushArt.
+     */
+    private static boolean sameTrack(String a, String b) {
+        String ta = titleInKey(a), tb = titleInKey(b);
+        return !ta.isEmpty() && ta.equals(tb);
+    }
+
+    /** The title out of a track key: package, title, and then whatever else that shape carries. */
+    private static String titleInKey(String key) {
+        if (key == null) return "";
+        int i = key.indexOf('|');
+        if (i < 0) return "";
+        int j = key.indexOf('|', i + 1);
+        return j < 0 ? key.substring(i + 1) : key.substring(i + 1, j);
     }
 
     /** The session's track title, which is what a queue item can be matched against. */
