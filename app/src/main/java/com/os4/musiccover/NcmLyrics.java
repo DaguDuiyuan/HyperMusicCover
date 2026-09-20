@@ -57,6 +57,26 @@ final class NcmLyrics {
      */
     private static final long DURATION_SLACK_MS = 3000L;
 
+    /**
+     * The window for a candidate that is on the session's own album, which is a wider one.
+     *
+     * The tight window above separates two recordings of a song, and the difference it is there
+     * to catch is large: the live take it was measured against is 25 seconds from the studio one.
+     * What it also rejects, being tight, is the same recording the session is playing - because
+     * one release is pressed and mastered differently by different catalogues, and three seconds
+     * is inside that noise. Measured 2026-09-20: Apple Music's 勇敢 (张惠妹) is 239964ms and every
+     * copy of it on NetEase is longer, the album's own at 244746ms and two compilations at
+     * 243000ms, all four with the exact title and the right artist. The song played with no lyrics
+     * at all, twice over: two of the four missed the three-second window by 36 milliseconds.
+     *
+     * The album is what tells the two situations apart. A different take is a different release
+     * and does not sit on the album the session says it is playing; a different pressing of it
+     * does, and its lyrics are the same lines timed against the same performance. So a candidate
+     * whose album matches gets six seconds and a candidate whose album does not is left where it
+     * was, still bounded by the window that was measured against real takes of real songs.
+     */
+    private static final long SAME_ALBUM_SLACK_MS = 6000L;
+
     /** What the session says about the song, reduced to the four things a match can use. */
     static final class Query {
         final String title;
@@ -249,11 +269,26 @@ final class NcmLyrics {
             return null;
         }
         long started = android.os.SystemClock.uptimeMillis();
-        String json = get(String.format(SEARCH, URLEncoder.encode(terms, "UTF-8")));
+        String url = String.format(SEARCH, URLEncoder.encode(terms, "UTF-8"));
+        String json = get(url);
         if (json == null) {
             return null;
         }
         String id = pick(json, q);
+        // The endpoint answers with songs that have nothing to do with the query for minutes at a
+        // time: measured 2026-09-20, "勇敢 张惠妹" coming back as a page of FM-84 and then as itself
+        // again a few minutes later, same phone, same headers, same URL. A search that proves
+        // nothing is worth asking twice and no more - the miss is what gets cached, so without
+        // this a bad minute on the other side costs the song its lyrics for the whole track, and
+        // with it a song that genuinely is not there costs one extra request, once.
+        if (id == null && q.durationMs > 0 && !norm(q.title).isEmpty()) {
+            Xp.log("[MCNcm] nothing in the results for " + q + "; asking again");
+            json = get(url);
+            if (json == null) {
+                return null;
+            }
+            id = pick(json, q);
+        }
         if (id == null) {
             Xp.log("[MCNcm] no candidate matched " + q + " (searched \"" + terms + "\")");
             return null;
@@ -349,7 +384,9 @@ final class NcmLyrics {
      *
      * Duration stays a hard gate rather than a score: outside the window a candidate is not
      * considered at all, whatever its title says. That is what separates a live take from its
-     * studio version - same title, same artists, 25 seconds apart.
+     * studio version - same title, same artists, 25 seconds apart. There are two windows rather
+     * than one and the album picks between them, because the same release is pressed and mastered
+     * differently by different catalogues; see SAME_ALBUM_SLACK_MS for the measurement.
      *
      * Nothing matching is a real answer. The caller shows no lyrics, which is what it did
      * before this source existed.
@@ -384,10 +421,6 @@ final class NcmLyrics {
             if (dur <= 0) {
                 continue;
             }
-            long diff = Math.abs(dur - q.durationMs);
-            if (diff > DURATION_SLACK_MS) {
-                continue;
-            }
             // A result with no name is not a candidate: scored, "null" would only ever have been
             // a title that matches nothing. See str() for why it has to be asked this way.
             String name = str(s, "name");
@@ -399,8 +432,16 @@ final class NcmLyrics {
                 continue;
             }
             org.json.JSONObject al = s.optJSONObject("album");
-            if (!q.album.isEmpty() && al != null
-                    && norm(q.album).equals(norm(al.optString("name", "")))) {
+            String albumName = al == null ? null : str(al, "name");
+            boolean sameAlbum = albumName != null && !q.album.isEmpty()
+                    && norm(q.album).equals(norm(albumName));
+            // Which window applies depends on the album, so the album has to be read before the
+            // window rather than after it as the tie-break it used to be. See SAME_ALBUM_SLACK_MS.
+            long diff = Math.abs(dur - q.durationMs);
+            if (diff > (sameAlbum ? SAME_ALBUM_SLACK_MS : DURATION_SLACK_MS)) {
+                continue;
+            }
+            if (sameAlbum) {
                 score++;
             }
             if (best == null || score > bestScore || (score == bestScore && diff < bestDiff)) {
