@@ -194,6 +194,18 @@ public class Main extends XposedModule {
     /** From a debug op, so a colour can be tried without hunting for the artwork that gives it. */
     private static volatile int sCoverTintOverride;
     /**
+     * The grey the always-on clock is drawn in, held for the rest of the doze. NaN outside one.
+     *
+     * The colour that reaches the AOD's glyphs lives in `glassData[11..13]` and is pushed by the
+     * OEM's palette pass - and that palette is computed from the wallpaper, which in cover mode is
+     * our album art. So the doze clock turns gold a second or two after it comes up; measured on
+     * the phone, and poking [11..13] on a dozing keyguard turns the whole clock red, which is how
+     * the location was proved. The AOD is not drawn on the cover. The first triple the doze inks
+     * with is taken down to its own lightness and then held, so the clock keeps the neutral the
+     * OEM starts from and the palette arriving late cannot repaint it. See the setMiGlass guard.
+     */
+    private static volatile float sAodGrey = Float.NaN;
+    /**
      * The strip of the cover that gets sampled for that reading, in dp from the top of the
      * screen. Generous on purpose: the date rests near the top and the collapsed clock
      * hangs under it, and how tall that whole block is depends on the clock style - 56dp clears
@@ -968,6 +980,7 @@ public class Main extends XposedModule {
                     // Ahead of the broadcast, which is ~110ms behind: the display is no longer
                     // interactive, and any colour set in between must not get the cover's tint.
                     sScreenOn = false;
+                    sAodGrey = Float.NaN;
                     ClockCollapse.toAod();
                     recolorClock();
                 }
@@ -978,6 +991,7 @@ public class Main extends XposedModule {
                     // unlocked, and the clock there is the shade's.
                     if (keyguardShowing()) {
                         sScreenOn = true;
+                        sAodGrey = Float.NaN;
                         ClockCollapse.enter(true, true);
                         recolorClock();
                     }
@@ -1723,6 +1737,8 @@ public class Main extends XposedModule {
                         recolorClock();
                     } else if ("gdata".equals(op)) {
                         pokeGlassData(i.getIntExtra("idx", -1), i.getFloatExtra("v", 0f));
+                    } else if ("aodprobe".equals(op)) {
+                        setResultData(aodProbe());
                     } else if ("depth".equals(op)) {
                         setDepthHidden(!i.getBooleanExtra("on", true));
                     } else if ("pushart".equals(op)) {
@@ -2215,9 +2231,12 @@ public class Main extends XposedModule {
                 // Every one of these three changes the answer to one of the two cached readings,
                 // so the timer below is not what anyone waits on at the moments that matter.
                 forgetSysReads();
-                if (Intent.ACTION_SCREEN_ON.equals(a)) sScreenOn = true;
-                else if (Intent.ACTION_SCREEN_OFF.equals(a)) {
+                if (Intent.ACTION_SCREEN_ON.equals(a)) {
+                    sScreenOn = true;
+                    sAodGrey = Float.NaN;
+                } else if (Intent.ACTION_SCREEN_OFF.equals(a)) {
                     sScreenOn = false;
+                    sAodGrey = Float.NaN;
                     // A tap still waiting out its double tap window was aimed at a screen that
                     // is gone; whatever was going to cancel it cannot arrive now.
                     cancelPendingTap("screen off");
@@ -6593,6 +6612,7 @@ public class Main extends XposedModule {
     static void noteAwake() {
         if (sScreenOn) return;
         sScreenOn = true;
+        sAodGrey = Float.NaN;
         forgetSysReads();
         recolorClock();
     }
@@ -8929,6 +8949,121 @@ public class Main extends XposedModule {
     }
 
     /**
+     * Holds the always-on clock's glyphs at the neutral they were first inked in.
+     *
+     * The colour lives in `glassData[11..13]` and is uploaded from the view's own field when the
+     * material is drawn - proved on a dozing keyguard by poking those three indices and watching
+     * the whole clock turn red on the next frame. So the FIELD is what has to be held, not the
+     * array handed to any one setter: on this build the OEM's palette pass reaches the glyphs by a
+     * route that goes through neither `TimeView.setGlassColor` (the tint op proved that one is
+     * dead here) nor `View.setMiGlass` (guarding that one still let the clock turn gold). Assert
+     * the field every doze frame instead, the way notifY and the depth cut-out are asserted.
+     *
+     * The first reading of a doze is taken as the neutral - it is what the OEM starts from, before
+     * the palette lands - and only its lightness is kept, so a doze caught late still ends up grey
+     * rather than gold.
+     *
+     * @return true when a glyph was rewritten and so needs the redraw
+     */
+    static boolean holdAodColour() {
+        if (!sCoverMode || sScreenOn) return false;
+        boolean wrote = false;
+        for (View root : clockRoots()) {
+            for (String id : new String[]{"hour_view", "minute_view", "colon_view"}) {
+                try {
+                    int rid = root.getContext().getResources()
+                            .getIdentifier(id, "id", "com.android.systemui");
+                    View t = rid == 0 ? null : root.findViewById(rid);
+                    if (t == null || t.getVisibility() != View.VISIBLE) continue;
+                    float[] g = (float[]) Xp.getObjectField(t, "glassData");
+                    if (g == null || g.length < 42) continue;
+                    if (Float.isNaN(sAodGrey)) {
+                        sAodGrey = luminance(g[11], g[12], g[13]);
+                    }
+                    if (g[11] != sAodGrey || g[12] != sAodGrey || g[13] != sAodGrey) {
+                        g[11] = sAodGrey;
+                        g[12] = sAodGrey;
+                        g[13] = sAodGrey;
+                        wrote = true;
+                    }
+                    // And solid. This is the half that was missing: the gold is not a colour at
+                    // all, it is the album-art wallpaper showing through a transparent glass
+                    // glyph - proved on one doze by the date reading (182,182,182) neutral while
+                    // the clock read (203,161,118) gold, the date being the one of the two with no
+                    // glass. The doze's own fill is 0, so the backdrop shows; the two seconds of
+                    // neutral the user saw at the start were the frames where it was still 1.
+                    if (g[36] < 0.999f) {
+                        g[36] = 1f;
+                        wrote = true;
+                    }
+                    if (wrote) t.invalidate();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        if (wrote) pushGlassFill(1f);
+        return wrote;
+    }
+
+    /** One `updateGlassValue` on both clock trees, screen on or off. */
+    private static void pushGlassFill(float v) {
+        for (View root : clockRoots()) {
+            try {
+                if (!(root instanceof ViewGroup)) continue;
+                View c = ((ViewGroup) root).getChildAt(0);
+                if (c != null) Xp.callMethod(c, "updateGlassValue", v);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** One line about the doze clock's colour state, readable from `am broadcast`. */
+    private static String aodProbe() {
+        boolean sbDone = false;
+        StringBuilder sb = new StringBuilder("aodprobe cover=" + sCoverMode
+                + " screenOn=" + sScreenOn + " grey=" + sAodGrey
+                + " guardHits=" + sMiGlassGuardHits);
+        for (View root : clockRoots()) {
+            for (String id : new String[]{"hour_view", "minute_view", "colon_view"}) {
+                try {
+                    int rid = root.getContext().getResources()
+                            .getIdentifier(id, "id", "com.android.systemui");
+                    View t = rid == 0 ? null : root.findViewById(rid);
+                    if (t == null) continue;
+                    float[] g = (float[]) Xp.getObjectField(t, "glassData");
+                    if (g == null || g.length < 42) continue;
+                    sb.append(" | ").append(id).append(" vis=").append(t.getVisibility())
+                      .append(" rgb=").append(g[11]).append(',').append(g[12]).append(',').append(g[13])
+                      .append(" fill=").append(g[36]);
+                    if (t.getVisibility() == View.VISIBLE && !sbDone) {
+                        sbDone = true;
+                        sb.append(" ALL=[");
+                        for (int j = 0; j < g.length; j++) {
+                            if (j > 0) sb.append(',');
+                            sb.append(j).append(':').append(g[j]);
+                        }
+                        sb.append(']');
+                        Object info = Xp.getObjectField(root, "mClockStyleInfo");
+                        if (info == null) {
+                            View clock = ((ViewGroup) root).getChildAt(0);
+                            info = Xp.getObjectField(clock, "mClockStyleInfo");
+                        }
+                        if (info != null) {
+                            sb.append(" style=[pri=")
+                              .append(Xp.callMethod(info, "getPrimaryColor")).append(" sec=")
+                              .append(Xp.callMethod(info, "getSecondaryColor")).append("]");
+                        } else {
+                            sb.append(" style=none");
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
      * Averages the strip of the composed cover the clock and its date are drawn on.
      *
      * Sampled from the composed bitmap rather than from the album art, because the two are not
@@ -9127,6 +9262,11 @@ public class Main extends XposedModule {
      * event reliably fires after both modules are loaded, so this hook registers AFTER HyperLight's
      * and runs last in the chain, where the last writer to args[0] is what the original receives.
      */
+    /** Rec. 709 luminance of a glass colour triple, which is what an even grey has to match. */
+    private static float luminance(float r, float g, float b) {
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+
     private static void armMiGlassGuard() {
         if (sMiGlassGuardArmed) return;
         sMiGlassGuardArmed = true;
@@ -9144,6 +9284,26 @@ public class Main extends XposedModule {
                             restored = true;
                         }
                     } catch (Throwable ignored) {
+                    }
+                }
+                // The always-on display. The colour pushed here is the OEM's palette, and that
+                // palette is computed from the wallpaper - which in cover mode is our album art,
+                // so the doze clock turns gold a moment after the screen goes off. The AOD is not
+                // drawn on the cover, so the colour is dropped and the first lightness the doze
+                // inks with is held instead. Only with cover mode on: without it the wallpaper is
+                // the real one and the OEM's colour describes the picture the clock is on.
+                if (sCoverMode && !sScreenOn && args[0] instanceof float[]) {
+                    float[] a = (float[]) args[0];
+                    if (a.length >= 42) {
+                        // Luminance, not max: the palette's gold is (1.0, 0.694, 0.384), whose
+                        // max is 1.0 - neutralising on that turns the clock pure white. Its
+                        // luminance is 0.736, which is the neutral the doze was inking before the
+                        // palette landed (measured 189/255 = 0.741 on screen).
+                        float mx = luminance(a[11], a[12], a[13]);
+                        if (Float.isNaN(sAodGrey)) sAodGrey = mx;
+                        float[] neutral = a.clone();
+                        neutral[11] = neutral[12] = neutral[13] = sAodGrey;
+                        args[0] = neutral;
                     }
                 }
                 int hits = ++sMiGlassGuardHits;

@@ -1169,6 +1169,9 @@ final class ClockCollapse {
                 sAodTop = m.inkTop;
                 sAodUnit = m.unit;
                 sAodDate = m.dateTop;
+                // The palette the OEM paints the doze with is computed from the wallpaper, which
+                // in cover mode is our album art, so left alone the clock turns gold a moment in.
+                Main.holdAodColour();
                 return;
             }
         }
