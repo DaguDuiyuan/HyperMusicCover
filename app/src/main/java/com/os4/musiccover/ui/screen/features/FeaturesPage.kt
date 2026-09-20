@@ -98,8 +98,10 @@ private fun FeatureList(
     ) {
         item {
             Column {
+                // The 12dp under the bar that every other list page in this app leaves. It was
+                // missing on this one card, which put it flush against the title.
                 Card(
-                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp)
                 ) {
                     ArrowPreference(
                         title = stringResource(R.string.features_cover_title),
