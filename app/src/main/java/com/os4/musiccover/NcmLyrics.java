@@ -280,11 +280,31 @@ final class NcmLyrics {
     /** One of the response's lyric slots, or null when it is absent or empty. */
     private static String body(org.json.JSONObject o, String field) {
         org.json.JSONObject slot = o.optJSONObject(field);
-        if (slot == null) {
+        return slot == null ? null : str(slot, "lyric");
+    }
+
+    /**
+     * A string field, or null when the field is absent, null, or not a string at all.
+     *
+     * Deliberately not optString(key, ""), which is not the same question on the two platforms
+     * this code runs on. On the JVM a JSON null answers the fallback; on Android it is a sentinel
+     * object, and optString answers String.valueOf(that) - the four characters "null" - so a
+     * field that is explicitly null reads as a string that says "null".
+     *
+     * That is not a hypothetical: it is what this endpoint sends for the yrc slot of every song
+     * whose lyric is the newer rich kind, and 带你飞 is one. The "null" came back as a lyric, and
+     * being neither null nor blank it won the yrc-over-lrc choice in fetch() over the lrc beside
+     * it, which held all 24 lines of the song. What the lock screen got was a four-character body
+     * that parses to nothing, and because the answer is cached per track, the song played out
+     * with no lyrics at all. Measured against the live response on the device, not reasoned.
+     */
+    private static String str(org.json.JSONObject o, String key) {
+        Object v = o.opt(key);
+        if (!(v instanceof String)) {
             return null;
         }
-        String s = slot.optString("lyric", "");
-        return s.trim().isEmpty() ? null : s;
+        String s = ((String) v).trim();
+        return s.isEmpty() ? null : s;
     }
 
     /** Title and artist, which is what the search endpoint ranks on. */
@@ -368,7 +388,13 @@ final class NcmLyrics {
             if (diff > DURATION_SLACK_MS) {
                 continue;
             }
-            int score = titleScore(wanted, norm(s.optString("name", "")));
+            // A result with no name is not a candidate: scored, "null" would only ever have been
+            // a title that matches nothing. See str() for why it has to be asked this way.
+            String name = str(s, "name");
+            if (name == null) {
+                continue;
+            }
+            int score = titleScore(wanted, norm(name));
             if (score == 0) {
                 continue;
             }
