@@ -301,7 +301,6 @@ private fun CoverGroup(
     val context = LocalContext.current
     ValueSlider(
         title = stringResource(R.string.cover_bias),
-        summary = stringResource(R.string.cover_bias_summary),
         value = module.bias,
         valueRange = 0f..1f,
         enabled = enabled,
@@ -323,7 +322,6 @@ private fun ClockGroup(
         // Where the date and the clock sit, moved as one block from where cover mode puts them.
         ValueSlider(
             title = stringResource(R.string.clock_height),
-            summary = stringResource(R.string.clock_height_summary),
             value = module.clockOffsetDp.coerceIn(CLOCK_OFFSET_MIN_DP, CLOCK_OFFSET_MAX_DP),
             valueRange = CLOCK_OFFSET_MIN_DP..CLOCK_OFFSET_MAX_DP,
             enabled = enabled,
@@ -339,7 +337,6 @@ private fun ClockGroup(
         // collapse cannot make a clock bigger than that, so 100% is the top.
         ValueSlider(
             title = stringResource(R.string.clock_size),
-            summary = stringResource(R.string.clock_size_summary),
             value = (if (module.clockSize > 0f) module.clockSize else DEFAULT_CLOCK_SIZE)
                 .coerceIn(CLOCK_SIZE_MIN, 1f),
             valueRange = CLOCK_SIZE_MIN..1f,
@@ -353,11 +350,11 @@ private fun ClockGroup(
         )
         // Not a cover setting either, in the same way the colon switch below is not: it is about
         // the clock the lock screen is showing when the display goes off. About the FULL-SCREEN
-        // always-on display only, which is why the summary names it - the plain AOD is left as the
-        // system draws it. Nothing to re-apply: the module reads it when the screen falls asleep.
+        // always-on display only - the plain AOD is left as the system draws it, and the row no
+        // longer says which of the two it means, so it is worth saying here. Nothing to
+        // re-apply: the module reads it when the screen falls asleep.
         SwitchPreference(
             title = stringResource(R.string.clock_aod_small),
-            summary = stringResource(R.string.clock_aod_small_summary),
             checked = module.aodSmall,
             enabled = enabled,
             onCheckedChange = {
@@ -372,7 +369,6 @@ private fun ClockGroup(
         // side and is not on this slider.
         ValueSlider(
             title = stringResource(R.string.clock_response),
-            summary = stringResource(R.string.clock_response_summary),
             value = module.clockResponse.coerceIn(CLOCK_RESPONSE_MIN, CLOCK_RESPONSE_MAX),
             valueRange = CLOCK_RESPONSE_MIN..CLOCK_RESPONSE_MAX,
             enabled = enabled,
@@ -386,11 +382,12 @@ private fun ClockGroup(
         // backwards, and dragging right made the effect weaker. The stored value, the adb
         // glassend op and the exported JSON all keep the OEM's meaning; only this slider is
         // flipped.
-        // Off on the styles whose clock has no glass to morph, and saying so. The morph is
-        // AllInOneBase.updateGlassValue(float) - the OEM's own ramp from refracting glass to a
-        // solid fill - and the rhombus, doodle, oriental and magazine clocks have no such thing:
-        // vector digits, bitmaps and plain text. A slider that moves and changes nothing is
-        // worse than one that explains itself.
+        // Off on the styles whose clock has no glass to morph, and saying so - the one row on this
+        // page that keeps a summary. The morph is AllInOneBase.updateGlassValue(float) - the OEM's
+        // own ramp from refracting glass to a solid fill - and the rhombus, doodle, oriental and
+        // magazine clocks have no such thing: vector digits, bitmaps and plain text, so there is
+        // nothing for this slider to move. A slider that cannot be moved and does not say why
+        // reads as broken, and this is the only one here that is ever in that state.
         val glassAvailable = module.clockHasGlass
         ValueSlider(
             title = stringResource(R.string.clock_glass),
@@ -411,7 +408,6 @@ private fun ClockGroup(
         // other restrictions this module lifts do not.
         SwitchPreference(
             title = stringResource(R.string.clock_force_colon),
-            summary = stringResource(R.string.clock_force_colon_summary),
             checked = module.forceColon,
             enabled = enabled,
             onCheckedChange = {
@@ -532,7 +528,6 @@ private fun LyricsGroup(
         )
         SwitchPreference(
             title = stringResource(R.string.lyrics_trans),
-            summary = stringResource(R.string.lyrics_trans_summary),
             checked = module.lyricsTrans,
             enabled = enabled && module.lyrics,
             onCheckedChange = {
@@ -542,7 +537,6 @@ private fun LyricsGroup(
         )
         SwitchPreference(
             title = stringResource(R.string.lyrics_hdr),
-            summary = stringResource(R.string.lyrics_hdr_summary),
             checked = module.lyricsHdr,
             enabled = enabled && module.lyrics,
             onCheckedChange = {
@@ -552,7 +546,6 @@ private fun LyricsGroup(
         )
         SwitchPreference(
             title = stringResource(R.string.lyrics_keep_on),
-            summary = stringResource(R.string.lyrics_keep_on_summary),
             checked = module.lyricsKeepOn,
             enabled = enabled && module.lyrics,
             onCheckedChange = {
@@ -597,7 +590,6 @@ private fun CardGroup(
         ) {
             SwitchPreference(
                 title = stringResource(R.string.card_art_in_lyrics),
-                summary = stringResource(R.string.card_art_in_lyrics_summary),
                 checked = module.mcArtInLyrics,
                 enabled = enabled,
                 onCheckedChange = { on ->
@@ -619,9 +611,10 @@ private fun CardGroup(
                 ModuleBridge.setCardTitleTap(context, it)
             },
         )
-        // Sits here because that is where it was asked for, but it is not a card setting and
-        // does not follow cover mode - which the summary says, since the two switches above it
-        // do. No onCardRestyled(): the preview above draws no fingerprint.
+        // Sits here because that is where it was asked for, but it is not a card setting and does
+        // not follow cover mode, unlike the switches above it - which the rows no longer say, so
+        // it is only in the module and in this comment. No onCardRestyled(): the preview above
+        // draws no fingerprint.
         SwitchPreference(
             title = stringResource(R.string.hide_fingerprint),
             checked = module.hideFingerprint,
@@ -633,17 +626,21 @@ private fun CardGroup(
         )
         // Three states rather than a switch: "off" would have to mean both "stop reserving the
         // space" and "reserve it even with no print enrolled", which are opposite requests.
+        //
+        // The two directions are named differently on the two sides of the wire: the module and
+        // the OEM call it avoidance, because that is what the fingerprint icon makes the
+        // notification do - move up - and the hook's own job is to override it. The rows say
+        // what the notification does instead, so "sinks" is avoidance switched off: item 1 is
+        // the module's fpavoid=1 and item 2 its fpavoid=2. Change the order here and the
+        // setting silently means the opposite of what it says.
         val avoidModes = listOf(
-            stringResource(R.string.fp_avoid_system),
-            stringResource(R.string.fp_avoid_never),
-            stringResource(R.string.fp_avoid_always),
+            stringResource(R.string.fp_sink_system),
+            stringResource(R.string.fp_sink_always),
+            stringResource(R.string.fp_sink_never),
         )
         val avoidIndex = module.fpAvoid.coerceIn(0, avoidModes.lastIndex)
         WindowDropdownPreference(
-            title = stringResource(R.string.fp_avoid),
-            // The delay is real and would otherwise read as the setting not working, so it is
-            // stated where the setting is, not in a release note.
-            summary = stringResource(R.string.fp_avoid_summary),
+            title = stringResource(R.string.fp_sink),
             items = avoidModes,
             selectedIndex = avoidIndex,
             enabled = enabled,
@@ -684,7 +681,7 @@ private const val CLOCK_RESPONSE_MAX = 0.60f
 @Composable
 internal fun ValueSlider(
     title: String,
-    summary: String?,
+    summary: String? = null,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     enabled: Boolean,
