@@ -1137,15 +1137,18 @@ final class LyricView extends View {
         // pre-draw: nothing to show, nothing to measure.
         if (lines.isEmpty() && show == 0f) return false;
         float clock = ClockCollapse.contentBottomOnScreen();
-        View card = LockLyrics.card();
+        // The band's own lower edge, not the card view: the lock screen's media card can be hidden
+        // for a whole song - the music capsule hides it outright, see
+        // LockLyrics.bandBottomOnScreen() - and when it is, the band fills the block the card
+        // would have taken rather than stopping above a card nobody is drawing.
+        float floor = LockLyrics.bandBottomOnScreen();
         boolean ok = false;
         float top = bandTop, bottom = bandBottom;
-        if (!Float.isNaN(clock) && card != null && card.isShown() && isAttachedToWindow()) {
+        if (!Float.isNaN(clock) && isAttachedToWindow()) {
             getLocationOnScreen(loc);
             float me = loc[1];
-            card.getLocationOnScreen(loc);
             top = clock + CLOCK_GAP_DP * density - me;
-            bottom = loc[1] - CARD_GAP_DP * density - me;
+            bottom = floor - CARD_GAP_DP * density - me;
             ok = bottom - top >= MIN_BAND_ROWS * textPx;
         }
         boolean changed = ok != bandOk
@@ -1882,7 +1885,10 @@ final class LyricView extends View {
         drawNsMax = drawNsSum = 0L;
         return "lines=" + lines.size() + " wordLines=" + words + " layoutMs=" + layoutMs + counts
                 + " focus=" + focus + " ms=" + ms + " show=" + show
-                + " band=" + (bandOk ? Math.round(bandTop) + ".." + Math.round(bandBottom) : "none")
+                // The route the band's lower edge came by, so a band placed off the fallback can
+                // be told apart from one that was measured.
+                + " band=" + (bandOk ? Math.round(bandTop) + ".." + Math.round(bandBottom)
+                        + "(" + LockLyrics.bandSource() + ")" : "none")
                 + " looping=" + looping + " parent=" + (getParent() instanceof ViewGroup);
     }
 }

@@ -7137,6 +7137,73 @@ public class Main extends XposedModule {
         return hit != null ? hit : findByName(root, id);
     }
 
+    /** The screen height the card readings are checked against. */
+    static int screenHeight() {
+        return sScreenH;
+    }
+
+    /**
+     * The lock screen's copy of a view the shade - or a third-party module - also puts up.
+     *
+     * `mi_media_controls` is declared by three layouts in SystemUI: the media card
+     * (miui_media_session) and two media island variants, both rooted at
+     * PlayerIslandConstraintLayout. findSysuiView() answers with whichever comes first in the
+     * tree, and that is the card only while no island copy is inflated - so a module that turns
+     * the island on can take the card away from everything that measures against it.
+     *
+     * The test for "this is the one the lock screen is showing" is the one sampleCardRect() and
+     * onLockTap() already use: the card sits in the notification area, below a clock pinned near
+     * the top, and is never up by the status bar. Anything higher is the shade's copy or an
+     * island. Falls back to findSysuiView(), so a card that is simply not laid out yet behaves
+     * exactly as it did.
+     */
+    static View findLockScreenView(String id) {
+        View v = sContainer;
+        if (v == null) return null;
+        View root = v.getRootView();
+        int i = v.getContext().getResources().getIdentifier(id, "id", "com.android.systemui");
+        View hit = i == 0 ? null : findOnScreenById(root, i);
+        return hit != null ? hit : findSysuiView(id);
+    }
+
+    /** The first view carrying this id that is really up on the lock screen, in tree order. */
+    private static View findOnScreenById(View v, int id) {
+        // Pruned on the way down: isShown() is false for everything under a hidden parent, so
+        // descending into one can only ever return null.
+        if (v.getVisibility() != View.VISIBLE) return null;
+        if (v.getId() == id && v.isShown() && v.isAttachedToWindow() && v.getHeight() > 0) {
+            int[] loc = new int[2];
+            v.getLocationOnScreen(loc);
+            if (loc[1] >= sScreenH / 3) return v;
+        }
+        if (!(v instanceof ViewGroup)) return null;
+        ViewGroup g = (ViewGroup) v;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View hit = findOnScreenById(g.getChildAt(i), id);
+            if (hit != null) return hit;
+        }
+        return null;
+    }
+
+    /**
+     * The bottom edge of the card rectangle on record, in screen pixels, or NaN when what is on
+     * record is not a reading.
+     *
+     * The bottom rather than the top because of what the lyrics do with it: with no card drawn,
+     * the band takes the space the card would have occupied, and that space ends here. Measured
+     * off the card's own rectangle, so it is the same block the OEM's content would have filled -
+     * on this screen 1700..2257, which stops clear of the shortcut buttons at 2219.
+     *
+     * sampleCardRect() only ever writes a settled card in the lower two thirds, and the state file
+     * re-applies the same test on load - so a zero, or a reading taken from the shade, is already
+     * excluded on the way in. The test is repeated here because sScreenH is the default 2608 until
+     * the container attaches, which is after loadState() has run.
+     */
+    static float sampledCardBottom() {
+        if (sCardT <= sScreenH / 3 || sCardH <= 0) return Float.NaN;
+        return sCardT + sCardH;
+    }
+
     /**
      * Finds a view by its resource entry name, walking the tree instead of resolving an id.
      *

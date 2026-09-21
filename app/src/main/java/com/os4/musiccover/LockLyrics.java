@@ -233,15 +233,109 @@ final class LockLyrics {
         return ClockCollapse.aodHeld() && !Main.screenOnCached();
     }
 
-    /** The media card, looked up again only when the one we hold has left the window. */
+    /**
+     * The media card, looked up again only when the one we hold has left the window.
+     *
+     * "Left the window" now includes "is not being shown": the card can be up in the tree and
+     * hidden for a whole song - see cardTopOnScreen() - and a card nobody can see is a card whose
+     * position nothing should be measured from, so the lookup is retried rather than held. What
+     * comes back is still whatever the tree holds, shown or not: describe() reports whether the
+     * card is up, and answering "none" there would lose the difference between "hidden" and
+     * "not there at all".
+     *
+     * The lookup is findLockScreenView rather than findSysuiView for the same reason: the id is
+     * declared by the media card and by both media island layouts, and the first match in the
+     * tree is only the card while no island copy is up.
+     */
     static View card() {
         View c = sCard;
-        if (c != null && c.isAttachedToWindow()) return c;
+        if (c != null && c.isShown() && c.isAttachedToWindow()) return c;
         long now = SystemClock.uptimeMillis();
-        if (now - sCardLookAt < 500L) return null;
+        if (now - sCardLookAt < 500L) return c;
         sCardLookAt = now;
-        sCard = Main.findSysuiView("mi_media_controls");
+        sCard = Main.findLockScreenView("mi_media_controls");
         return sCard;
+    }
+
+    /** The band stops above the card the lock screen is showing. */
+    private static final int BAND_LIVE = 0;
+    /** ... at the end of the block the card would have filled. */
+    private static final int BAND_SPACE = 1;
+    /** ... off the card fractions LockPreview.kt carries for a phone nothing was measured on. */
+    private static final int BAND_DEFAULT = 2;
+    /**
+     * The card's own share of the screen - the same two fractions the app's preview falls back to
+     * (LockPreview.kt's SAMPLE_CARD_T and SAMPLE_CARD_H), so that a phone which has never had a
+     * card measured puts the module's band and the app's preview in the same place.
+     */
+    private static final float CARD_TOP_FRACTION = 1700f / 2608f;
+    private static final float CARD_HEIGHT_FRACTION = 557f / 2608f;
+    /** Which of the three answered last; -1 until one has. */
+    private static volatile int sBandSrc = -1;
+
+    /**
+     * Where the band's lower edge sits on screen, in pixels.
+     *
+     * Above the card where there is a card to read, because that is the only reading that follows
+     * it through the cover morph. The case the other two routes exist for is a card that is not up
+     * at all: the lock screen's media card is hidden outright by HyperLight's music capsule, which
+     * hooks MiuiMediaHeaderView.setVisibility and rewrites the OEM's VISIBLE into GONE (measured
+     * 2026-09-21). The lyrics used to give up entirely there - the band could not be measured, so
+     * they never faded in and the lock screen showed no lyrics at all.
+     *
+     * With no card drawn there is nothing to stop above, so the band takes the block the card
+     * would have filled instead of reserving a place for something nobody is drawing. That block
+     * is the recorded rectangle's BOTTOM edge, not its top: it is the whole of the gap the user
+     * sees between the lyrics and the shortcut buttons once the capsule has moved the media
+     * elsewhere. The recorded rectangle lags - the card is not sampled while it is hidden, and
+     * onLockTap's notes record a reading of 1360 against a card actually at 1700 - so the route is
+     * logged and reported rather than passed off as a measurement.
+     *
+     * Nothing on record at all leaves the two fractions the app's preview uses.
+     */
+    static float bandBottomOnScreen() {
+        View c = card();
+        if (c != null && c.isShown() && c.isAttachedToWindow()) {
+            int[] loc = new int[2];
+            c.getLocationOnScreen(loc);
+            // Below the clock, like the card. Anything higher is the shade's copy or an island,
+            // and neither is what the band is measured against.
+            if (loc[1] >= Main.screenHeight() / 3) {
+                setBandSource(BAND_LIVE);
+                return loc[1];
+            }
+        }
+        float recorded = Main.sampledCardBottom();
+        if (!Float.isNaN(recorded)) {
+            setBandSource(BAND_SPACE);
+            return recorded;
+        }
+        setBandSource(BAND_DEFAULT);
+        return Main.screenHeight() * (CARD_TOP_FRACTION + CARD_HEIGHT_FRACTION);
+    }
+
+    /** Which route answered bandBottomOnScreen(), as something readable in a broadcast result. */
+    static String bandSource() {
+        switch (sBandSrc) {
+            case BAND_LIVE:
+                return "live";
+            case BAND_SPACE:
+                return "space";
+            case BAND_DEFAULT:
+                return "default";
+            default:
+                return "?";
+        }
+    }
+
+    /**
+     * Written once a frame from the band, so it only speaks when the answer changes: a card that
+     * stays hidden for the whole song would otherwise log its line with every pre-draw.
+     */
+    private static void setBandSource(int src) {
+        if (src == sBandSrc) return;
+        sBandSrc = src;
+        Xp.log(TAG + "band anchored to the " + bandSource() + " card position");
     }
 
     /** Where the singing is, extrapolated from the last position the session reported. */
@@ -571,6 +665,11 @@ final class LockLyrics {
                 + " cardP=" + Main.cardProgress()
                 + " container=" + (c == null ? "none" : c.getAlpha() + "/shown=" + c.isShown())
                 + " card=" + (card == null ? "none" : "shown=" + card.isShown())
+                // Where the band's lower edge came from: live stops above the card, space fills
+                // the block it would have taken (what happens while the music capsule hides it),
+                // default is the fractions. A hidden card is visible in this line as the route
+                // the lyrics are being placed on rather than as a missing reading.
+                + " bandSrc=" + bandSource()
                 + " clockBottom=" + ClockCollapse.contentBottomOnScreen()
                 + " ink=" + ClockCollapse.inkBottomOnScreen()
                 + " shown=" + wantsShown() + " tick=" + sTicking
