@@ -65,8 +65,8 @@
     <string name="about">More</string>
     <string name="about_source_code">Source Code</string>
     <string name="about_dependencies">Third Party Licenses</string>
-    <string name="license_apache">Apache License 2.0</string>
-    <string name="license_apache_summary">View full license text</string>
+    <string name="license_agpl">GNU AGPL v3.0</string>
+    <string name="license_agpl_summary">View full license text · modified versions must stay open source</string>
     <string name="third_party_licenses_title">Third Party Licenses</string>
     <string name="about_credits">Credits</string>
     <string name="about_credits_summary">The projects this one learnt from</string>

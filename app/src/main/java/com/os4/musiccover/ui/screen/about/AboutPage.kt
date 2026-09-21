@@ -392,9 +392,9 @@ private fun AboutContent(
                         ),
                     ) {
                         ArrowPreference(
-                            title = stringResource(R.string.license_apache),
-                            summary = stringResource(R.string.license_apache_summary),
-                            onClick = { uriHandler.openUri("https://www.apache.org/licenses/LICENSE-2.0.txt") },
+                            title = stringResource(R.string.license_agpl),
+                            summary = stringResource(R.string.license_agpl_summary),
+                            onClick = { uriHandler.openUri("https://www.gnu.org/licenses/agpl-3.0.txt") },
                         )
                         ArrowPreference(
                             title = stringResource(R.string.about_dependencies),
