@@ -932,7 +932,7 @@ public class Main extends XposedModule {
                     public void run() {
                         if (sCoverMode && ClockCollapse.phase() == ClockCollapse.Phase.AOD
                                 && keyguardShowing()) {
-                            ClockCollapse.enter(true, true);
+                            ClockCollapse.enter(true, true, "kg-post");
                         }
                     }
                 });
@@ -1006,7 +1006,7 @@ public class Main extends XposedModule {
                     if (keyguardShowing()) {
                         sScreenOn = true;
                         sAodGrey = Float.NaN;
-                        ClockCollapse.enter(true, true);
+                        ClockCollapse.enter(true, true, "doAnim");
                         recolorClock();
                     }
                 }
@@ -1755,6 +1755,8 @@ public class Main extends XposedModule {
                         pokeGlassData(i.getIntExtra("idx", -1), i.getFloatExtra("v", 0f));
                     } else if ("aodprobe".equals(op)) {
                         setResultData(aodProbe());
+                    } else if ("entries".equals(op)) {
+                        setResultData(ClockCollapse.entries());
                     } else if ("depth".equals(op)) {
                         setDepthHidden(!i.getBooleanExtra("on", true));
                     } else if ("pushart".equals(op)) {
@@ -2272,7 +2274,7 @@ public class Main extends XposedModule {
                     // The wake normally entered already, from the doAnimationToAod hook, before
                     // the first lit frame. This is the fallback for a build without that method.
                     if (sCoverMode && ClockCollapse.leavingOrOff() && keyguardShowing()) {
-                        ClockCollapse.enter(true, true);
+                        ClockCollapse.enter(true, true, "screenOn");
                     }
                     // Waking re-runs the OEM's depth pipeline, and if the keyguard was rebuilt
                     // while the screen was off the guard went away with the old view.
@@ -6674,7 +6676,7 @@ public class Main extends XposedModule {
         applyMediaCard();
         // The response is the slider's, read when the transition starts and nowhere else, which
         // is what makes a change land on the next transition and never mid-flight.
-        ClockCollapse.enter(animate, false);
+        ClockCollapse.enter(animate, false, "cover");
         // The reading may predate this cover - the card can come up on art that was pushed
         // before the user ever locked the phone - and the OEM will not re-colour on its own.
         recolorClock();
@@ -9268,6 +9270,9 @@ public class Main extends XposedModule {
         // The clock's own state, because the whole setting is about where it is drawn: phase,
         // the pose being held, and the two the AOD recorded for the wake to start from.
         sb.append(" | ").append(ClockCollapse.describe());
+        // And which route took each of the last few entries, with what it found - a wake that
+        // comes out two different ways is only visible here; see ClockCollapse.noteEntry.
+        sb.append(" | ").append(ClockCollapse.entries());
         View date = visibleDate();
         sb.append(" | date=").append(date == null ? "none" : geomOf(date));
         for (View root : clockRoots()) {

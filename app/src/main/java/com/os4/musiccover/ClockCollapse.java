@@ -120,6 +120,23 @@ final class ClockCollapse {
     private static float sFromTop = Float.NaN, sFromUnit = Float.NaN, sFromDate = Float.NaN;
     /** The last pose the AOD drew, for the wake to start from. NaN top = none yet. */
     private static float sAodTop = Float.NaN, sAodUnit = Float.NaN, sAodDate = Float.NaN;
+
+    /**
+     * The same doze pose as it was DRAWN, which is not the same numbers.
+     *
+     * The fields above are the OEM's layout box, and they are what the fall INTO the aod is aimed
+     * at and checked against when it lands (`LIVE.unit` in that check is a box height too, and
+     * DOZE_SETTLE_PX does not tolerate a scale's worth of difference). The box is taller than
+     * anything on screen, though: the OEM animates its AOD clock with a scale of its own.
+     *
+     * A wake has to start from what was ON SCREEN. Measured 2026-09-21, it did not: the same wake
+     * came out two different ways - from 1328.9 (the box) when this doze's frames had run, and
+     * from the 1011 the screen actually had when they had not, because a doze with nothing
+     * recorded makes the wake fall back on captureFrom(), which does count the scale. What the
+     * user saw was the shrink starting from a clock that had never been drawn, at random, and
+     * only on the wakes that came after a doze long enough for a frame to run in it.
+     */
+    private static float sAodShowTop = Float.NaN, sAodShowUnit = Float.NaN, sAodShowDate = Float.NaN;
     /** Card progress (0 = OEM's look, 1 = cover look) at the two ends. */
     private static float sCardFrom, sCardTo;
     /**
@@ -242,6 +259,11 @@ final class ClockCollapse {
      *                along, so only the clock travels, and it travels from the AOD's clock
      */
     static void enter(boolean animate, boolean wake) {
+        enter(animate, wake, "?");
+    }
+
+    /** @param src which route took this entry, for the log - see noteEntry. */
+    static void enter(boolean animate, boolean wake, String src) {
         if (!Main.screenOn() && !sWaking) {
             // The AOD shows the full clock; the wake brings it in.
             toAod();
@@ -258,6 +280,7 @@ final class ClockCollapse {
         prepareGlass();
         install();
         if (!animate || Main.sContainer == null) {
+            noteEntry(src, wake, false, false, Float.NaN, Float.NaN, Float.NaN, Float.NaN, LIVE.unit);
             stopFrame();
             sPhase = Phase.ON;
             sExitToAod = false;
@@ -270,10 +293,13 @@ final class ClockCollapse {
             Xp.log(TAG + "clock: cover look on (floor y=" + Main.r1(floor) + ")");
             return;
         }
-        if (was == Phase.AOD && !Float.isNaN(sAodTop)) {
-            sFromTop = sAodTop;
-            sFromUnit = sAodUnit;
-            sFromDate = sAodDate;
+        // The DRAWN pose, not the box: a wake that starts from the box is starting from a clock
+        // the doze never showed - see sAodShowTop.
+        boolean fromAod = was == Phase.AOD && !Float.isNaN(sAodShowTop);
+        if (fromAod) {
+            sFromTop = sAodShowTop;
+            sFromUnit = sAodShowUnit;
+            sFromDate = sAodShowDate;
         } else {
             captureFrom();
             if (was == Phase.OFF && !wake && !Float.isNaN(sFromTop)) noteNaturalUnit(LIVE.unit);
@@ -292,6 +318,12 @@ final class ClockCollapse {
         // A wake's glyphs already settle after the size, on the OEM's own animation; a toggle's
         // are given the same tail. See TOGGLE_GLYPH_RESPONSE.
         start(Phase.ENTER, wake ? Float.NaN : TOGGLE_GLYPH_RESPONSE);
+        // The OEM's own ink box at this instant - the one reading that says whether its wake
+        // animation had already begun when this entry was taken, which is the whole question when
+        // the same wake comes out two different ways. See noteEntry.
+        float oemUnit = LIVE.unit;
+        if (measure(ENTRY)) oemUnit = ENTRY.unit;
+        noteEntry(src, wake, animate, fromAod, sYFrom, sYTo, sFromTop, sFromUnit, oemUnit);
         Xp.log(TAG + "clock: enter" + (wake ? " from the AOD" : "") + " y " + Main.r1(sYFrom)
                 + " -> " + Main.r1(sYTo) + " from " + was);
     }
@@ -341,10 +373,6 @@ final class ClockCollapse {
      */
     static void toAod() {
         sWaking = false;
-        // Which of the two dozes this is. Asked here, once per sleep, because it is what decides
-        // whether the clock's colour stays ours if the clock is handed back - and because asking
-        // it means reflecting, which the frames of the doze must not do. See sAodFullScreen.
-        sAodFullScreen = Main.fullAodOn();
         // The start pose is read BEFORE the OEM's y goes back: the y changes the OEM's box at
         // once, and the transforms on the views still describe the old one - reading after would
         // start the spring from a clock several times the size of the one on screen.
@@ -363,6 +391,12 @@ final class ClockCollapse {
             Main.sHoldY = null;
             if (!Float.isNaN(natural)) Main.applyY(natural);
         }
+        // Which of the two dozes this is, asked once per sleep and asked HERE for a reason: it
+        // reflects into the interfaces manager, and the two things above it are the ones the
+        // hand-over is timed against - the pose has to be read before the y goes back, and the y
+        // before the OEM's doAnimationToAod reads it. Every path below returns through this, so
+        // one latch covers them all. See sAodFullScreen.
+        sAodFullScreen = Main.fullAodOn();
         switch (sPhase) {
             case AOD:
                 // Already asleep. sAodHeld stands as it was latched.
@@ -381,6 +415,7 @@ final class ClockCollapse {
                 sAodHeld = false;
                 sPhase = Phase.AOD;
                 sAodTop = Float.NaN;
+                sAodShowTop = Float.NaN;
                 install();
                 Xp.log(TAG + "clock: watching the AOD");
                 return;
@@ -488,6 +523,43 @@ final class ClockCollapse {
             sT = 1f;
             land();
         }
+    }
+
+    /**
+     * The last few entries into the cover look, as `op entries` prints them.
+     *
+     * There are four routes into a wake - the pre-draw, the KeyguardService post, the
+     * doAnimationToAod hook and the screen-on broadcast - and which one takes it, and what the
+     * OEM's own animation was doing at that moment, cannot be seen from the screen: the two come
+     * out at the same pose and differ only in the middle of the walk. Kept as text rather than
+     * numbers because the question is "which of these was different", and the answer is read once.
+     */
+    private static final String[] sEntryLog = new String[8];
+    private static int sEntryN;
+
+    private static void noteEntry(String src, boolean wake, boolean animate, boolean fromAod,
+                                  float y0, float yTo, float top0, float unit0, float oemUnit) {
+        int n = ++sEntryN;
+        sEntryLog[(n - 1) % sEntryLog.length] = "#" + n
+                + "@" + (android.os.SystemClock.uptimeMillis() / 100) / 10f + "s"
+                + " src=" + src + (wake ? "/wake" : "/toggle") + (animate ? "/anim" : "/cut")
+                + " start=" + (fromAod ? "aod" : "live")
+                + " tail=" + sGlyphTail
+                + " y=" + Main.r1(y0) + "->" + Main.r1(yTo)
+                + " top=" + Main.r1(top0) + " unit=" + Main.r1(unit0)
+                + " oemUnit=" + Main.r1(oemUnit)
+                + " aodUnit=" + Main.r1(sAodUnit);
+    }
+
+    /** The entry log, oldest first. Read by `op entries`; see noteEntry. */
+    static String entries() {
+        StringBuilder sb = new StringBuilder("entries=" + sEntryN);
+        int keep = Math.min(sEntryN, sEntryLog.length);
+        for (int i = 0; i < keep; i++) {
+            String s = sEntryLog[(sEntryN - keep + i) % sEntryLog.length];
+            if (s != null) sb.append(" | ").append(s);
+        }
+        return sb.toString();
     }
 
     static String describe() {
@@ -1107,6 +1179,7 @@ final class ClockCollapse {
         sTv = 0f;
         sFromTop = Float.NaN;
         sAodTop = Float.NaN;
+        sAodShowTop = Float.NaN;
         sGlassP = 0f;
         uninstall();
         clearTransforms();
@@ -1269,6 +1342,12 @@ final class ClockCollapse {
 
     private static final Live LIVE = new Live();
 
+    /**
+     * A second measurement, taken at the moment of an entry into the cover look and kept out of
+     * LIVE so it cannot disturb the frame that is about to be drawn. For noteEntry.
+     */
+    private static final Live ENTRY = new Live();
+
     private static float parentTop(View v) {
         if (!(v.getParent() instanceof View)) return 0f;
         ((View) v.getParent()).getLocationOnScreen(LOC);
@@ -1355,7 +1434,7 @@ final class ClockCollapse {
             if (sWaking && Main.coverModeOn()) {
                 // The first lock screen frame of the wake, before it is drawn. Enter now, from the
                 // clock the AOD was showing, and place this very frame.
-                enter(true, true);
+                enter(true, true, "predraw");
                 phase = sPhase;
                 if (phase != Phase.ENTER) return;
             } else if (sAodHeld && !Float.isNaN(sFromTop) && m.unit > 0f) {
@@ -1375,10 +1454,15 @@ final class ClockCollapse {
                 // only reaches the OEM when the value is news, so this is one notifStateChange.
                 if (!Float.isNaN(sAodHoldY)) hold(sAodHoldY);
                 writePose(m, sFromTop, sFromUnit, sFromDate, false);
-                // The wake starts from what is on screen, which is this pose.
+                // The wake starts from what is on screen, which is this pose - and here the pose
+                // IS ours, so the box and the drawn pose are the two recorded the same way; see
+                // sAodShowTop for which of them a wake reads.
                 sAodTop = sFromTop;
                 sAodUnit = sFromUnit;
                 sAodDate = sFromDate;
+                sAodShowTop = sFromTop;
+                sAodShowUnit = sFromUnit;
+                sAodShowDate = sFromDate;
                 return;
             } else {
                 // The OEM's clock as it is. What it looks like here is the wake's start.
@@ -1392,6 +1476,13 @@ final class ClockCollapse {
                 sAodTop = m.inkTop;
                 sAodUnit = m.unit;
                 sAodDate = m.dateTop;
+                // And the same pose as the screen is showing it, for the wake to start from - see
+                // sAodShowTop. The scale is the OEM's own here: nothing of ours is on the clock.
+                View tg = firstTarget();
+                float sc = tg == null ? 1f : tg.getScaleY();
+                sAodShowTop = m.inkTop + (tg == null ? 0f : tg.getTranslationY());
+                sAodShowUnit = m.unit * sc;
+                sAodShowDate = m.date == null ? Float.NaN : m.dateTop + m.date.getTranslationY();
                 Main.holdAodColour();
                 return;
             }
@@ -1567,5 +1658,8 @@ final class ClockCollapse {
         sAodTop = Float.NaN;
         sAodUnit = Float.NaN;
         sAodDate = Float.NaN;
+        sAodShowTop = Float.NaN;
+        sAodShowUnit = Float.NaN;
+        sAodShowDate = Float.NaN;
     }
 }
