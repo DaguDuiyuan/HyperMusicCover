@@ -1545,6 +1545,7 @@ public class Main extends XposedModule {
                     + "\nhidefp=" + (sHideFp ? 1 : 0)
                     + "\naodsmall=" + (sAodSmall ? 1 : 0)
                     + "\ncolon=" + (HyperTweaks.sForceColon ? 1 : 0)
+                    + "\nseekglow=" + (HyperTweaks.sBarGlow ? 1 : 0)
                     + "\nlyrics=" + (LockLyrics.sEnabled ? 1 : 0)
                     + "\nlyrickeep=" + (LockLyrics.sKeepOn ? 1 : 0)
                     + "\nlyrichdr=" + (LockLyrics.sHdr ? 1 : 0)
@@ -1633,6 +1634,7 @@ public class Main extends XposedModule {
                         else if ("hidefp".equals(k)) sHideFp = "1".equals(v);
                         else if ("aodsmall".equals(k)) sAodSmall = "1".equals(v);
                         else if ("colon".equals(k)) HyperTweaks.sForceColon = "1".equals(v);
+                        else if ("seekglow".equals(k)) HyperTweaks.sBarGlow = "1".equals(v);
                         else if ("lyrics".equals(k)) LockLyrics.sEnabled = "1".equals(v);
                         else if ("lyrickeep".equals(k)) LockLyrics.sKeepOn = "1".equals(v);
                         else if ("lyrichdr".equals(k)) LockLyrics.sHdr = "1".equals(v);
@@ -1964,6 +1966,19 @@ public class Main extends XposedModule {
                         // on the next layout, which the keyguard does every time it comes up.
                         Xp.log(TAG + "force clock colon "
                                 + (HyperTweaks.sForceColon ? "on" : "off"));
+                    } else if ("seekglow".equals(op)) {
+                        HyperTweaks.sBarGlow = i.getBooleanExtra("on", !HyperTweaks.sBarGlow);
+                        saveState();
+                        // The card on screen was built before this switch was read, so it is
+                        // upgraded in place - its constructor is long past and the mode it read
+                        // there is a final field. Turning the switch off cannot undo that on this
+                        // card: it applies to the next one the OEM builds.
+                        View bar = findLockScreenView("media_progress_bar");
+                        String r = bar == null ? "no card up" : HyperTweaks.applyBarGlow(bar);
+                        Xp.log(TAG + "media bar glow " + (HyperTweaks.sBarGlow ? "on" : "off")
+                                + " - " + r);
+                        setResultData((HyperTweaks.sBarGlow ? "on " : "off ") + r
+                                + (HyperTweaks.sBarGlow ? "" : " (the card up keeps its glow)"));
                     } else if ("hidefp".equals(op)) {
                         sHideFp = i.getBooleanExtra("on", !sHideFp);
                         saveState();
@@ -2128,6 +2143,7 @@ public class Main extends XposedModule {
                         out.putBoolean("hidefp", sHideFp);
                         out.putBoolean("aodsmall", sAodSmall);
                         out.putBoolean("colon", HyperTweaks.sForceColon);
+                        out.putBoolean("seekglow", HyperTweaks.sBarGlow);
                         out.putBoolean("lyrics", LockLyrics.sEnabled);
                         out.putBoolean("lyrickeep", LockLyrics.sKeepOn);
                         out.putBoolean("lyrichdr", LockLyrics.sHdr);
