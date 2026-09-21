@@ -66,6 +66,20 @@ final class ClockCollapse {
     private static boolean sAodHeld;
 
     /**
+     * Whether this doze is the FULL-SCREEN one, latched at the start of sleep like sAodHeld.
+     *
+     * Latched for the same reason and read for one question: who the doze clock's COLOUR belongs
+     * to when the clock was handed back. The full-screen doze is the one the setting is about - the
+     * whole lock screen shown dimmed, its own big clock over the album art - and a user who turned
+     * the setting off is asking for the system's clock there, colour included; a colour of ours on
+     * it is invented out of nothing and reads as a grey slab (reported 2026-09-21). Every other
+     * doze is held at a neutral, which is what stopped the plain AOD turning gold - see
+     * Main.holdAodColour(). Latched rather than read live: `Main.fullAodOn()` reflects into the
+     * interfaces manager and is not something to ask on a per-frame path.
+     */
+    private static boolean sAodFullScreen;
+
+    /**
      * The OEM's y as it was held when the screen fell asleep, put back on it for the length of a
      * held doze.
      *
@@ -200,6 +214,11 @@ final class ClockCollapse {
         return sAodHeld;
     }
 
+    /** Whether this doze is the full-screen one - for Main.holdAodColour(). */
+    static boolean aodFullScreen() {
+        return sAodFullScreen;
+    }
+
     /** Anything of ours on the clock that belongs to the lock screen being up. */
     static boolean active() {
         return sPhase == Phase.ENTER || sPhase == Phase.ON || sPhase == Phase.EXIT;
@@ -322,6 +341,10 @@ final class ClockCollapse {
      */
     static void toAod() {
         sWaking = false;
+        // Which of the two dozes this is. Asked here, once per sleep, because it is what decides
+        // whether the clock's colour stays ours if the clock is handed back - and because asking
+        // it means reflecting, which the frames of the doze must not do. See sAodFullScreen.
+        sAodFullScreen = Main.fullAodOn();
         // The start pose is read BEFORE the OEM's y goes back: the y changes the OEM's box at
         // once, and the transforms on the views still describe the old one - reading after would
         // start the spring from a clock several times the size of the one on screen.
@@ -1078,6 +1101,7 @@ final class ClockCollapse {
         sPhase = Phase.OFF;
         sExitToAod = false;
         sAodHeld = false;
+        sAodFullScreen = false;
         sAodHoldY = Float.NaN;
         sT = 1f;
         sTv = 0f;
@@ -1358,12 +1382,16 @@ final class ClockCollapse {
                 return;
             } else {
                 // The OEM's clock as it is. What it looks like here is the wake's start.
+                //
+                // Its colour is asked about separately, and the answer depends on WHICH doze this
+                // is: holdAodColour() holds a neutral for the plain one, where the gold is the
+                // album art behind the glyphs and nothing else describes the picture the clock is
+                // on, and holds nothing at all for a full-screen doze whose clock was handed back,
+                // where the user asking for the system's clock means the system's colour too.
                 clearTransforms();
                 sAodTop = m.inkTop;
                 sAodUnit = m.unit;
                 sAodDate = m.dateTop;
-                // The palette the OEM paints the doze with is computed from the wallpaper, which
-                // in cover mode is our album art, so left alone the clock turns gold a moment in.
                 Main.holdAodColour();
                 return;
             }

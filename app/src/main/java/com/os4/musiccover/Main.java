@@ -9143,7 +9143,27 @@ public class Main extends XposedModule {
     }
 
     /**
-     * Holds the always-on clock's glyphs at the neutral they were first inked in.
+     * Whether the doze clock's colour is ours to hold at all.
+     *
+     * Two of the three dozes are ours. A doze that KEPT the cover's clock is the lock screen's
+     * carried into sleep, so it holds the lock screen's own colour (captureAodGlass). A plain
+     * always-on display - the linkage AOD, the classic plugin one - is held at a neutral, because
+     * what it would otherwise be painted is the wallpaper's palette and in cover mode the
+     * wallpaper is the album art: that is the gold 84869b1 was written for.
+     *
+     * The third is the FULL-SCREEN doze whose clock was handed back, and its colour is the OEM's:
+     * the setting exists to say whether that clock is ours, and with it off there is no reading of
+     * ours to hold it at - the neutral is the first ink's lightness and nothing more - which comes
+     * out as a flat grey slab where the system had glass over the wallpaper. Reported 2026-09-21:
+     * "音乐封面模式开启 + 全屏息屏显示保持小时钟关闭" and the big clock came up grey. Only this
+     * one configuration is left alone; the other two are held exactly as before.
+     */
+    private static boolean aodColourOurs() {
+        return ClockCollapse.aodHeld() || !ClockCollapse.aodFullScreen();
+    }
+
+    /**
+     * Holds the always-on clock's glyphs at the colour they are ours to hold.
      *
      * The colour lives in `glassData[11..13]` and is uploaded from the view's own field when the
      * material is drawn - proved on a dozing keyguard by poking those three indices and watching
@@ -9153,19 +9173,14 @@ public class Main extends XposedModule {
      * dead here) nor `View.setMiGlass` (guarding that one still let the clock turn gold). Assert
      * the field every doze frame instead, the way notifY and the depth cut-out are asserted.
      *
-     * The first reading of a doze is taken as the neutral - it is what the OEM starts from, before
-     * the palette lands - and only its lightness is kept, so a doze caught late still ends up grey
-     * rather than gold.
-     *
      * @return true when a glyph was rewritten and so needs the redraw
      */
     static boolean holdAodColour() {
-        if (!sCoverMode || sScreenOn) return false;
+        if (!sCoverMode || sScreenOn || !aodColourOurs()) return false;
         // A doze that kept the cover's clock is showing the LOCK SCREEN's clock, so it holds the
-        // colour and the fill the lock screen had rather than the doze's neutral. Same mechanism
-        // and same reason - the palette pass repaints a doze whether the clock is ours or the
-        // OEM's, so the field has to be asserted either way; only the value differs. Read at the
-        // moment of sleep, before the doze had inked anything with its own palette.
+        // colour and the fill the lock screen had. Read at the moment of sleep, before the doze had
+        // inked anything with its own palette. The capture is only ever taken for a held doze, so
+        // this also says whether the reading below is the lock screen's or a dead one.
         boolean cover = ClockCollapse.aodHeld() && sAodCoverGlassSet;
         boolean wrote = false;
         for (View root : clockRoots()) {
@@ -9192,6 +9207,11 @@ public class Main extends XposedModule {
                         if (wrote) t.invalidate();
                         continue;
                     }
+                    // The plain always-on display, and a held doze whose glass could not be read at
+                    // sleep. Neither has a colour of ours to be held at, and what the OEM would
+                    // paint is the wallpaper's palette - the album art, in cover mode - so the
+                    // neutral the doze first inks with is held instead. Only its lightness is kept,
+                    // so a doze caught late still ends up neutral rather than gold.
                     if (Float.isNaN(sAodGrey)) {
                         sAodGrey = luminance(g[11], g[12], g[13]);
                     }
@@ -9238,6 +9258,8 @@ public class Main extends XposedModule {
         StringBuilder sb = new StringBuilder("aodprobe cover=" + sCoverMode
                 + " screenOn=" + sScreenOn + " grey=" + sAodGrey
                 + " aodsmall=" + sAodSmall + " fullAod=" + fullAodOn()
+                + " aodFull=" + ClockCollapse.aodFullScreen()
+                + " held=" + ClockCollapse.aodHeld()
                 + " coverGlass=" + (sAodCoverGlassSet
                         ? sAodCoverGlass[0] + "," + sAodCoverGlass[1] + ","
                           + sAodCoverGlass[2] + " fill=" + sAodCoverGlass[3]
@@ -9518,13 +9540,12 @@ public class Main extends XposedModule {
                     } catch (Throwable ignored) {
                     }
                 }
-                // The always-on display. The colour pushed here is the OEM's palette, and that
-                // palette is computed from the wallpaper - which in cover mode is our album art,
-                // so the doze clock turns gold a moment after the screen goes off. The AOD is not
-                // drawn on the cover, so the colour is dropped and the first lightness the doze
-                // inks with is held instead. Only with cover mode on: without it the wallpaper is
-                // the real one and the OEM's colour describes the picture the clock is on.
-                if (sCoverMode && !sScreenOn && args[0] instanceof float[]) {
+                // The always-on displays whose colour is ours (aodColourOurs). The colour pushed
+                // here is the OEM's palette, computed from the wallpaper - which in cover mode is
+                // our album art - and that palette would repaint the clock a moment after the
+                // screen goes off. So the colour is dropped and the first lightness the doze inks
+                // with is held instead, which is what holdAodColour() holds too.
+                if (sCoverMode && !sScreenOn && aodColourOurs() && args[0] instanceof float[]) {
                     float[] a = (float[]) args[0];
                     if (a.length >= 42) {
                         // Luminance, not max: the palette's gold is (1.0, 0.694, 0.384), whose
