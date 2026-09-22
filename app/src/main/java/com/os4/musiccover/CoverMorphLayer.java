@@ -34,9 +34,9 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
 
     /**
      * One per window, kept attached and INVISIBLE between morphs. Added at the start of every
-     * morph and removed at its end, it cost a layout of the whole shade window each time - the
-     * 25-35ms first frame measured on every toggle, which the tap handler itself (10-16ms, the
-     * morph's start ~4ms of it) did not account for. VISIBLE and INVISIBLE only redraw.
+     * morph and removed at its end, it asked for a layout of the whole shade window twice per
+     * morph; VISIBLE and INVISIBLE only redraw. (Not the 25-35ms first frame of a tap toggle:
+     * a two-finger switch morphs the same way and never showed it - see the dt cap in doFrame.)
      */
     private CoverMorphLayer(Context context) {
         super(context);
