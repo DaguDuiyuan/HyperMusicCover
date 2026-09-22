@@ -62,9 +62,7 @@ final class LyricView extends View {
     private static final float BG_GAP_DP = 3f;
     private static final float BG_ALPHA = 0.72f;
     private static final float BG_LIFT = 0.6f;
-    private static final int WEIGHT = 600;
     private static final int TRANS_WEIGHT = 500;
-    private static final float SIDE_DP = 30f;
     /** Between one line's last row (or its translation) and the next line. */
     private static final float GAP_DP = 22f;
     private static final float TRANS_GAP_DP = 5f;
@@ -107,8 +105,6 @@ final class LyricView extends View {
      * two different numbers here came out as one margin visibly wider than the other: on
      * 2026-09-17 the first row sat 52dp below the clock with the last 37dp above the card.
      */
-    private static final float CLOCK_GAP_DP = 16f;
-    private static final float CARD_GAP_DP = 16f;
     /** A band shorter than this many rows of text is not worth showing lyrics in. */
     private static final float MIN_BAND_ROWS = 2.4f;
     /**
@@ -256,10 +252,14 @@ final class LyricView extends View {
     private float rowAt = Float.NaN, rowFeather, rowSungA, rowUnsungA;
 
     private final float density;
-    private final float textPx;
+    private float textPx;
     private final float liftPx, glowPx;
     /** Room around a line for its glow and lift, and around a blurred node for the blur. */
-    private final int wordPad, blurPad;
+    private int wordPad;
+    private final int blurPad;
+    private float sidePx;
+    /** The typography and width currently represented by the layouts and blur cache. */
+    private LyricStyle layoutStyle;
 
     // ---- content, rebuilt when the lines or the width change
     private int version = -1;
@@ -293,6 +293,7 @@ final class LyricView extends View {
     private int wantVersion = -1, wantWidth = -1;
     /** The translation switch the layout in the air is for; -1 above means none is. */
     private boolean wantTrans;
+    private LyricStyle wantStyle;
     /** The translation switch the layout now in use was made under. */
     private boolean builtTrans = true;
     /** Diagnostics: how long the last layout took on its thread. */
@@ -327,6 +328,7 @@ final class LyricView extends View {
     private int ms;
     private float show;
     private float bandTop, bandBottom;
+    private final float[] bandBounds = new float[2];
     private boolean bandOk;
     /**
      * The centring correction in force this frame, and the one the geometry is asking for, both
@@ -368,23 +370,13 @@ final class LyricView extends View {
     LyricView(Context ctx) {
         super(ctx);
         density = getResources().getDisplayMetrics().density;
-        textPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, TEXT_SP,
-                getResources().getDisplayMetrics());
         liftPx = LIFT_DP * density;
         glowPx = GLOW_DP * density;
-        wordPad = (int) Math.ceil(glowPx * 1.6f + liftPx + textPx * GLOW_SWELL);
         blurPad = (int) Math.ceil((BLUR_NEXT_DP + BLUR_DP_PER_ROW * BLUR_MAX_ROWS) * density * 2f);
         paint.setColor(0xFFFFFFFF);
-        paint.setTextSize(textPx);
-        paint.setTypeface(Typeface.create(Typeface.DEFAULT, WEIGHT, false));
         transPaint.setColor(0xFFFFFFFF);
-        transPaint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, TRANS_SP,
-                getResources().getDisplayMetrics()));
-        transPaint.setTypeface(Typeface.create(Typeface.DEFAULT, TRANS_WEIGHT, false));
         bgPaint.setColor(0xFFFFFFFF);
-        bgPaint.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, BG_SP,
-                getResources().getDisplayMetrics()));
-        bgPaint.setTypeface(Typeface.create(Typeface.DEFAULT, BG_WEIGHT, false));
+        applyPaintStyle(LockLyrics.sStyle);
         // No frame rate is asked for here. The keyguard window renders at 60Hz on this 120Hz
         // panel unless the screen is touched, and neither setRequestedFrameRate on this view nor
         // a 120Hz vote on the window's own layer moved HyperOS off that (SurfaceFlinger dumps,
@@ -393,6 +385,20 @@ final class LyricView extends View {
         setClickable(false);
         setFocusable(false);
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+    }
+
+    private void applyPaintStyle(LyricStyle style) {
+        layoutStyle = style;
+        textPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, style.sizeSp,
+                getResources().getDisplayMetrics());
+        wordPad = (int) Math.ceil(glowPx * 1.6f + liftPx + textPx * GLOW_SWELL);
+        sidePx = style.sidePx(getWidth(), density, textPx);
+        paint.setTextSize(textPx);
+        paint.setTypeface(Typeface.create(Typeface.DEFAULT, style.weight, false));
+        transPaint.setTextSize(textPx * TRANS_SP / TEXT_SP);
+        transPaint.setTypeface(Typeface.create(Typeface.DEFAULT, TRANS_WEIGHT, false));
+        bgPaint.setTextSize(textPx * BG_SP / TEXT_SP);
+        bgPaint.setTypeface(Typeface.create(Typeface.DEFAULT, BG_WEIGHT, false));
     }
 
     /** Something outside changed - a line start, the song, the setting. Wakes the loop. */
@@ -447,7 +453,8 @@ final class LyricView extends View {
                 // row out from under every line, so it is asked for the same way a new lyric set
                 // is. Compared against what the layout in use was built with, not the field, or
                 // the request would still look outstanding the moment it landed.
-                || LockLyrics.sTrans != builtTrans)
+                || LockLyrics.sTrans != builtTrans
+                || !LockLyrics.sStyle.sameLayout(layoutStyle))
                 && (LockLyrics.wantsAttached() || show == 0f)) {
             if (layOut()) {
                 changed = true;
@@ -952,36 +959,51 @@ final class LyricView extends View {
         final int v = LockLyrics.version();
         final int width = getWidth();
         final boolean transOn = LockLyrics.sTrans;
+        final LyricStyle style = LockLyrics.sStyle;
         final List<LyricLine> ls = LockLyrics.lines();
+        if (!ls.isEmpty() && v == wantVersion && width == wantWidth && transOn == wantTrans
+                && style.sameLayout(wantStyle)) return false;
+        final float buildTextPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP,
+                style.sizeSp, getResources().getDisplayMetrics());
+        final float buildSidePx = style.sidePx(width, density, buildTextPx);
+        // Copies, including the requested typography: the current paints keep drawing the old
+        // layout until the replacement is ready. A rapid slider drag cannot mix both styles.
+        final TextPaint p = new TextPaint(paint);
+        p.setTextSize(buildTextPx);
+        p.setTypeface(Typeface.create(Typeface.DEFAULT, style.weight, false));
+        final TextPaint bp = new TextPaint(bgPaint);
+        bp.setTextSize(buildTextPx * BG_SP / TEXT_SP);
+        final TextPaint tp = new TextPaint(transPaint);
+        tp.setTextSize(buildTextPx * TRANS_SP / TEXT_SP);
         if (ls.isEmpty()) {
             wantVersion = wantWidth = -1;
             wantTrans = transOn;
-            apply(build(v, width, ls, paint, bgPaint, transPaint, transOn));
+            wantStyle = null;
+            apply(build(v, width, ls, p, bp, tp, transOn, style, buildTextPx, buildSidePx));
             return true;
         }
-        if (v == wantVersion && width == wantWidth && transOn == wantTrans) return false;
         wantVersion = v;
         wantWidth = width;
         wantTrans = transOn;
-        // Copies: the view's paints are recoloured on every frame. Each layout draws with the
-        // copy it was built with from here on - see drawStatic.
-        final TextPaint p = new TextPaint(paint);
-        final TextPaint bp = new TextPaint(bgPaint);
-        final TextPaint tp = new TextPaint(transPaint);
+        wantStyle = style;
         layoutHandler().post(new Runnable() {
             @Override
             public void run() {
-                final Built b = build(v, width, ls, p, bp, tp, transOn);
+                final Built b = build(v, width, ls, p, bp, tp, transOn,
+                        style, buildTextPx, buildSidePx);
                 post(new Runnable() {
                     @Override
                     public void run() {
                         // Overtaken by a newer request: that one's answer is the one to wait for.
-                        if (v != wantVersion || width != wantWidth || transOn != wantTrans) return;
+                        if (v != wantVersion || width != wantWidth || transOn != wantTrans
+                                || !style.sameLayout(wantStyle)) return;
                         wantVersion = wantWidth = -1;
+                        wantStyle = null;
                         // Stale by the time it landed, or asked for and then frozen by the lyrics
                         // being switched off: the next step asks again when it is due.
                         if (v != LockLyrics.version() || width != getWidth()
                                 || transOn != LockLyrics.sTrans
+                                || !style.sameLayout(LockLyrics.sStyle)
                                 || !LockLyrics.wantsAttached()) {
                             return;
                         }
@@ -998,6 +1020,7 @@ final class LyricView extends View {
     /** One layout of the lines, made wherever build ran. */
     private static final class Built {
         int version, width, w;
+        LyricStyle style;
         /** The translation switch this layout was made under; see LockLyrics.sTrans. */
         boolean transOn;
         List<LyricLine> lines;
@@ -1009,15 +1032,17 @@ final class LyricView extends View {
 
     /** Touches nothing of the view's but its constants, so it can run off the UI thread. */
     private Built build(int v, int width, List<LyricLine> ls, TextPaint p, TextPaint bp,
-                        TextPaint tp, boolean transOn) {
+                        TextPaint tp, boolean transOn, LyricStyle style, float buildTextPx,
+                        float buildSidePx) {
         long t0 = SystemClock.uptimeMillis();
         Built b = new Built();
         b.version = v;
         b.width = width;
+        b.style = style;
         b.transOn = transOn;
         b.lines = ls;
         int n = ls.size();
-        int w = Math.max(1, width - Math.round(2f * SIDE_DP * density));
+        int w = Math.max(1, width - Math.round(2f * buildSidePx));
         b.w = w;
         b.main = new StaticLayout[n];
         b.trans = new StaticLayout[n];
@@ -1035,7 +1060,7 @@ final class LyricView extends View {
             long gapStart = i == 0 ? 0L : ls.get(i - 1).end;
             if (l.start - gapStart >= LULL_MS) {
                 b.dotsTop[i] = y;
-                y += DOTS_SLOT_EM * textPx + gap;
+                y += DOTS_SLOT_EM * buildTextPx + gap;
             } else {
                 b.dotsTop[i] = Float.NaN;
             }
@@ -1080,6 +1105,7 @@ final class LyricView extends View {
 
     /** Puts a finished layout in, and starts every line's animated state over. UI thread. */
     private void apply(Built b) {
+        applyPaintStyle(b.style);
         version = b.version;
         builtTrans = b.transOn;
         lines = b.lines;
@@ -1147,9 +1173,11 @@ final class LyricView extends View {
         if (!Float.isNaN(clock) && isAttachedToWindow()) {
             getLocationOnScreen(loc);
             float me = loc[1];
-            top = clock + CLOCK_GAP_DP * density - me;
-            bottom = floor - CARD_GAP_DP * density - me;
-            ok = bottom - top >= MIN_BAND_ROWS * textPx;
+            if (LockLyrics.sStyle.writeBand(clock, floor, density, textPx, bandBounds)) {
+                top = bandBounds[0] - me;
+                bottom = bandBounds[1] - me;
+                ok = bottom - top >= MIN_BAND_ROWS * textPx - 0.01f;
+            }
         }
         boolean changed = ok != bandOk
                 || Math.abs(top - bandTop) >= 0.5f || Math.abs(bottom - bandBottom) >= 0.5f;
@@ -1238,7 +1266,7 @@ final class LyricView extends View {
         // and offsetting the canvas instead would have left those alphas describing where the
         // line was going to be rather than where it is.
         float anchor = anchorY() + (1f - show) * FLOAT_DP * density;
-        float side = SIDE_DP * density;
+        float side = sidePx;
         float fade = Math.min(EDGE_FADE_DP * density, bandH / 3f);
         int n = lines.size();
         updateTint();

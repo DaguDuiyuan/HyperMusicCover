@@ -19,6 +19,11 @@ import org.json.JSONObject
 object SettingsBackup {
 
     private const val KEY_BIAS = "coverBias"
+    private const val KEY_COVER_STYLE = "coverStyle"
+    private const val KEY_COVER_CARD_SIZE = "coverCardSizeDp"
+    private const val KEY_COVER_CARD_MARGIN = "coverCardMarginDp"
+    private const val KEY_COVER_CARD_OFFSET = "coverCardOffsetDp"
+    private const val KEY_COVER_CARD_AOD = "coverCardAod"
     private const val KEY_CLOCK_HEIGHT = "clockHeight"
     /** Written by versions that stored the collapse as a scale coefficient; read, never written. */
     private const val KEY_CLOCK_SCALE = "clockScale"
@@ -37,6 +42,11 @@ object SettingsBackup {
     private const val KEY_LYRICS_KEEP_ON = "lyricsKeepOn"
     private const val KEY_LYRICS_HDR = "lyricsHdr"
     private const val KEY_LYRICS_TRANS = "lyricsTranslation"
+    private const val KEY_LYRIC_OFFSET = "lyricWindowOffsetDp"
+    private const val KEY_LYRIC_GAP = "lyricVerticalGapDp"
+    private const val KEY_LYRIC_SIDE = "lyricSideMarginDp"
+    private const val KEY_LYRIC_SIZE = "lyricMainSizeSp"
+    private const val KEY_LYRIC_WEIGHT = "lyricMainWeight"
     private const val KEY_FP_AVOID = "fingerprintAvoid"
     /** The whole notification-shade page, as one object keyed the way the module names them. */
     private const val KEY_SHADE = "shade"
@@ -48,6 +58,11 @@ object SettingsBackup {
         val module = ModuleBridge.query(context)
         if (module.alive) {
             json.put(KEY_BIAS, module.bias.toDouble())
+            json.put(KEY_COVER_STYLE, module.coverStyle)
+            json.put(KEY_COVER_CARD_SIZE, module.coverCardSizeDp.toDouble())
+            json.put(KEY_COVER_CARD_MARGIN, module.coverCardMarginDp.toDouble())
+            json.put(KEY_COVER_CARD_OFFSET, module.coverCardOffsetDp.toDouble())
+            json.put(KEY_COVER_CARD_AOD, module.coverCardAod)
             json.put(KEY_CLOCK_HEIGHT, module.clockHeightDp.toDouble())
             if (module.clockSize > 0f) json.put(KEY_CLOCK_SIZE, module.clockSize.toDouble())
             json.put(KEY_CLOCK_OFFSET, module.clockOffsetDp.toDouble())
@@ -63,6 +78,11 @@ object SettingsBackup {
             json.put(KEY_LYRICS_KEEP_ON, module.lyricsKeepOn)
             json.put(KEY_LYRICS_HDR, module.lyricsHdr)
             json.put(KEY_LYRICS_TRANS, module.lyricsTrans)
+            json.put(KEY_LYRIC_OFFSET, module.lyricOffsetDp.toDouble())
+            json.put(KEY_LYRIC_GAP, module.lyricGapDp.toDouble())
+            json.put(KEY_LYRIC_SIDE, module.lyricSideDp.toDouble())
+            json.put(KEY_LYRIC_SIZE, module.lyricSizeSp.toDouble())
+            json.put(KEY_LYRIC_WEIGHT, module.lyricWeight)
             json.put(KEY_FP_AVOID, module.fpAvoid)
             // Written whole rather than key by key, because the map is built from the module's
             // own list of keys - this file has no idea what is in it, which is the point.
@@ -79,6 +99,19 @@ object SettingsBackup {
         try {
             val obj = JSONObject(json)
             if (obj.has(KEY_BIAS)) ModuleBridge.setBias(context, obj.getDouble(KEY_BIAS).toFloat())
+            if (obj.has(KEY_COVER_CARD_SIZE)) {
+                ModuleBridge.setCoverStyle(context, "size", obj.getDouble(KEY_COVER_CARD_SIZE).toFloat())
+            }
+            if (obj.has(KEY_COVER_CARD_MARGIN)) {
+                ModuleBridge.setCoverStyle(context, "margin", obj.getDouble(KEY_COVER_CARD_MARGIN).toFloat())
+            }
+            if (obj.has(KEY_COVER_CARD_OFFSET)) {
+                ModuleBridge.setCoverStyle(context, "offset", obj.getDouble(KEY_COVER_CARD_OFFSET).toFloat())
+            }
+            ModuleBridge.setCoverStyle(context, "mode",
+                if (obj.has(KEY_COVER_STYLE)) obj.getInt(KEY_COVER_STYLE).toFloat() else 0f)
+            ModuleBridge.setCoverCardAod(context,
+                if (obj.has(KEY_COVER_CARD_AOD)) obj.getBoolean(KEY_COVER_CARD_AOD) else false)
             // The old key held a coefficient. A value under the new range is recognised as one
             // of those by the module and converted there against the glyphs actually on screen,
             // which is the only thing that knows what a coefficient of 0.335 was worth.
@@ -129,6 +162,21 @@ object SettingsBackup {
             }
             if (obj.has(KEY_LYRICS_TRANS)) {
                 ModuleBridge.setLyricsTrans(context, obj.getBoolean(KEY_LYRICS_TRANS))
+            }
+            if (obj.has(KEY_LYRIC_OFFSET)) {
+                ModuleBridge.setLyricStyle(context, "offset", obj.getDouble(KEY_LYRIC_OFFSET).toFloat())
+            }
+            if (obj.has(KEY_LYRIC_GAP)) {
+                ModuleBridge.setLyricStyle(context, "gap", obj.getDouble(KEY_LYRIC_GAP).toFloat())
+            }
+            if (obj.has(KEY_LYRIC_SIDE)) {
+                ModuleBridge.setLyricStyle(context, "side", obj.getDouble(KEY_LYRIC_SIDE).toFloat())
+            }
+            if (obj.has(KEY_LYRIC_SIZE)) {
+                ModuleBridge.setLyricStyle(context, "size", obj.getDouble(KEY_LYRIC_SIZE).toFloat())
+            }
+            if (obj.has(KEY_LYRIC_WEIGHT)) {
+                ModuleBridge.setLyricStyle(context, "weight", obj.getDouble(KEY_LYRIC_WEIGHT).toFloat())
             }
             if (obj.has(KEY_FP_AVOID)) {
                 ModuleBridge.setFingerprintAvoid(context, obj.getInt(KEY_FP_AVOID))

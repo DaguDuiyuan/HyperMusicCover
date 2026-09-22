@@ -80,6 +80,17 @@ final class LockLyrics {
      * than leaving a gap where it was.
      */
     static volatile boolean sTrans = true;
+    /** Immutable snapshot: the UI, renderer and state loader all use the same validated values. */
+    static volatile LyricStyle sStyle = LyricStyle.DEFAULT;
+
+    static boolean setStyle(String key, float value) {
+        LyricStyle next = sStyle.with(key, value);
+        if (next == sStyle) return false;
+        sStyle = next;
+        LyricView view = sView;
+        if (view != null) view.kick();
+        return true;
+    }
     /** How far above SDR white the window may go; the text asks for less than this. */
     private static final float HDR_HEADROOM = 4f;
     private static Object sShadeWindow;
@@ -197,6 +208,15 @@ final class LockLyrics {
     /** Whether the view belongs in the keyguard right now. */
     static boolean wantsAttached() {
         return wanted() && Main.coverModeOn();
+    }
+
+    /** The lyric page after a tap enters cover mode, including newLook's tap-hidden rule. */
+    static boolean willAttachOnTapEntry(boolean tappedBack) {
+        return CoverMorphRoute.lyricsAfterEntry(sEnabled, sTapHidden, tappedBack, sDemo);
+    }
+
+    static boolean willAttachAfterTapToggle() {
+        return CoverMorphRoute.lyricsAfterToggle(sEnabled, sTapHidden, sDemo);
     }
 
     /**
@@ -583,6 +603,7 @@ final class LockLyrics {
         if (wantsAttached()) attach();
         LyricView v = sView;
         if (v != null) v.kick();
+        CoverCardLayer.refresh();
     }
 
     /** The app's switch. The setting: it is written to the state file and the app reads it back. */

@@ -33,6 +33,11 @@ object ModuleBridge {
         val cover: Boolean = false,
         val auto: Boolean = false,
         val bias: Float = 0.34f,
+        val coverStyle: Int = 0,
+        val coverCardSizeDp: Float = 240f,
+        val coverCardMarginDp: Float = 16f,
+        val coverCardOffsetDp: Float = 0f,
+        val coverCardAod: Boolean = false,
         /**
          * How tall the collapsed clock's digits are, in dp.
          *
@@ -94,6 +99,11 @@ object ModuleBridge {
         val lyricsHdr: Boolean = false,
         /** Draw each line's translation under it. On unless the user turns it off. */
         val lyricsTrans: Boolean = true,
+        val lyricOffsetDp: Float = 0f,
+        val lyricGapDp: Float = 16f,
+        val lyricSideDp: Float = 30f,
+        val lyricSizeSp: Float = 25f,
+        val lyricWeight: Int = 600,
         /**
          * A session has actually carried its own lyric since SystemUI started.
          *
@@ -187,6 +197,15 @@ object ModuleBridge {
 
     fun setBias(context: Context, v: Float) = send(context, "bias") { putExtra("v", v) }
 
+    fun setCoverStyle(context: Context, key: String, value: Float) =
+        send(context, "coverstyle") {
+            putExtra("key", key)
+            putExtra("v", value)
+        }
+
+    fun setCoverCardAod(context: Context, on: Boolean) =
+        send(context, "covercardaod") { putExtra("on", on) }
+
     fun setClockHeight(context: Context, dp: Float) =
         send(context, "clockscale") { putExtra("v", dp) }
 
@@ -233,6 +252,13 @@ object ModuleBridge {
 
     fun setLyricsTrans(context: Context, on: Boolean) =
         send(context, "lyrictrans") { putExtra("on", on) }
+
+    /** The module validates every value, including imported settings and adb broadcasts. */
+    fun setLyricStyle(context: Context, key: String, value: Float) =
+        send(context, "lyricstyle") {
+            putExtra("key", key)
+            putExtra("v", value)
+        }
 
     fun setFingerprintAvoid(context: Context, mode: Int) =
         send(context, "fpavoid") { putExtra("mode", mode) }
@@ -451,6 +477,11 @@ object ModuleBridge {
             cover = b.getBoolean("cover", false),
             auto = b.getBoolean("auto", false),
             bias = b.getFloat("bias", 0.34f),
+            coverStyle = b.getInt("coverstyle", 0),
+            coverCardSizeDp = b.getFloat("covercardsize", 240f),
+            coverCardMarginDp = b.getFloat("covercardmargin", 16f),
+            coverCardOffsetDp = b.getFloat("covercardoffset", 0f),
+            coverCardAod = b.getBoolean("covercardaod", false),
             clockHeightDp = b.getFloat("clock", 36f),
             clockSize = sizeOf(b),
             clockOffsetDp = b.getFloat("clockoff", 0f),
@@ -472,6 +503,11 @@ object ModuleBridge {
             lyricsHdr = b.getBoolean("lyrichdr", false),
             // Defaults the other way: this one is on for anyone whose module predates the key.
             lyricsTrans = b.getBoolean("lyrictrans", true),
+            lyricOffsetDp = b.getFloat("lyricoff", 0f),
+            lyricGapDp = b.getFloat("lyricgap", 16f),
+            lyricSideDp = b.getFloat("lyricside", 30f),
+            lyricSizeSp = b.getFloat("lyricsize", 25f),
+            lyricWeight = b.getInt("lyricweight", 600),
             sessionLyric = b.getBoolean("sessionlyric", false),
             fpAvoid = b.getInt("fpavoid", 0),
             shade = b.keySet()

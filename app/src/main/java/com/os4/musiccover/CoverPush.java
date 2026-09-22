@@ -82,6 +82,7 @@ final class CoverPush {
         if (Main.sVideoWallpaper) showVideoCover(ctx, on, art);
         long t0 = android.os.SystemClock.uptimeMillis();
         Intent out = wallpaperIntent("art");
+        out.putExtra("cardmode", Main.sCoverCardStyle.mode == CoverCardStyle.CARD);
         // The blur travels with the cover. A lyricblur broadcast is one shot - dropped, or
         // overtaken on the other side - and nothing else ever corrected it, so a song could play
         // out sharp under its lyrics. This makes every track change an agreement between the two
@@ -109,6 +110,7 @@ final class CoverPush {
         // looking at, and the clock is not springing either.
         out.putExtra("fade", Main.sFadeWp && Main.screenOn());
         if (!on) {
+            CoverCardLayer.clear();
             out.putExtra("off", true);
             ctx.sendBroadcast(out);
             Main.sTrackKey = "";
@@ -124,6 +126,7 @@ final class CoverPush {
             return;
         }
         if (art == null) { Xp.log(Main.TAG + "pushart: no album art"); return; }
+        if (Main.sCoverCardStyle.mode == CoverCardStyle.CARD) CoverCardLayer.publish(art);
         int w = Main.sScreenW, h = Main.sScreenH;
         if (!Main.sVideoWallpaper && Main.sWpComposes) {
             // The source goes over instead of the composed picture, and the wallpaper process
@@ -281,6 +284,10 @@ final class CoverPush {
                         Main.sCover = iv;
                     }
                     iv.setImageBitmap(full);
+                    if (Main.sCoverCardStyle.mode == CoverCardStyle.CARD) {
+                        CoverCardLayer.attach(layer);
+                        CoverCardLayer.style(Main.sCoverCardStyle);
+                    }
                     Bitmap old = Main.sCoverBitmap;
                     Main.sCoverBitmap = full;
                     if (old != null && old != full) old.recycle();
@@ -394,7 +401,7 @@ final class CoverPush {
     private static ViewTreeObserver.OnPreDrawListener sCoverGuard;
 
     /** keyguard_background_layer, which sits behind the whole clock stack. */
-    private static ViewGroup coverLayer() {
+    static ViewGroup coverLayer() {
         View v = Main.sContainer;
         if (v == null) return null;
         int id = v.getResources().getIdentifier(
@@ -1402,9 +1409,14 @@ final class CoverPush {
         }
     }
 
-    /** See CoverCompose.composeWallpaper(); kept here so the call sites read as they did. */
+    /**
+     * See CoverCompose.composeWallpaper(); kept here so the call sites read as they did. In card
+     * mode the wallpaper is only the blurred backdrop - the square itself is CoverCardLayer.
+     */
     private static Bitmap composeWallpaper(Bitmap src, int w, int h, float bias) {
-        return CoverCompose.composeWallpaper(src, w, h, bias);
+        return Main.sCoverCardStyle.mode == CoverCardStyle.CARD
+                ? CoverCompose.cardBackground(src, w, h)
+                : CoverCompose.composeWallpaper(src, w, h, bias);
     }
 
     /** Fills w x h from the source without distorting it, the way CENTER_CROP would. */
