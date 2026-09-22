@@ -4817,7 +4817,17 @@ public class Main extends XposedModule {
         // Only while the cover is up: outside it, a track may have changed since the square last
         // had art, and it would fly the previous album.
         Bitmap own = sCoverMode ? CoverCardLayer.currentArt() : null;
-        if (own != null) return own;
+        // A copy, not the square's own: a tap back in mid-flight pushes the art again, and the
+        // square recycles its previous bitmap 180ms into that crossfade - the one the copy was
+        // flying, which then drew nothing until the morph had landed (~450ms of no cover).
+        // 512x512, about a millisecond to copy.
+        if (own != null) {
+            try {
+                Bitmap mine = own.copy(own.getConfig(), false);
+                if (mine != null) return mine;
+            } catch (Throwable ignored) {
+            }
+        }
         Bitmap thumb = cardThumbnail();
         return thumb != null ? thumb : (sAppCtx == null ? null : albumArt(sAppCtx, false));
     }
