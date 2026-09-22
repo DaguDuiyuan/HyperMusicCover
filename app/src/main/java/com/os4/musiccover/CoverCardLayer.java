@@ -282,9 +282,22 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     static String describe() {
         CoverCardLayer v = sView;
         if (v == null) return "view=none";
+        // The ancestors' scale and whether each one clips its children: the AOD wash is drawn
+        // past this view's bounds, which only reaches the screen edge if nothing clips it.
+        StringBuilder chain = new StringBuilder();
+        for (Object p = v.getParent(); p instanceof ViewGroup; p = ((ViewGroup) p).getParent()) {
+            ViewGroup g = (ViewGroup) p;
+            String id = "?";
+            try {
+                if (g.getId() != View.NO_ID) id = g.getResources().getResourceEntryName(g.getId());
+            } catch (Throwable ignored) {
+            }
+            chain.append(' ').append(id).append("[s=").append(g.getScaleX())
+                    .append(g.getClipChildren() ? ",clip" : "").append(']');
+        }
         return "view.playing=" + v.playing + " scale=" + v.scale.value
                 + " ticking=" + v.ticking + " opacity=" + v.opacity
-                + " attached=" + v.isAttachedToWindow();
+                + " attached=" + v.isAttachedToWindow() + " chain=" + chain;
     }
 
     static float renderedScale(ViewGroup layer) {
@@ -401,8 +414,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             paint.setShader(null);
             paint.setColor(0xFFFFFFFF);
             paint.setAlpha(64);
-            canvas.drawBitmap(current.aodBackdrop, null,
-                    new RectF(0f, 0f, getWidth(), getHeight()), paint);
+            canvas.drawBitmap(current.aodBackdrop, null, screenInView(), paint);
         }
         // A doze frame may draw before the queued animation frame clears a stale lock-screen
         // opacity. The lyric page must never show the square underneath it in the full AOD.
@@ -463,6 +475,28 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
 
     private static BlurMaskFilter sShadowBlur;
     private static float sShadowBlurPx;
+
+    /**
+     * The whole display, in this view's coordinates. The doze scales keyguard_root_view to 0.95
+     * (see Main's keyguard zoom notes) and this layer is inside it, so a wash drawn at the view's
+     * own bounds came out 5% short and framed by the dark wallpaper. The zoom itself is right
+     * and stays; only this full-screen wash is drawn back out past it.
+     */
+    private RectF screenInView() {
+        float sx = 1f, sy = 1f;
+        for (Object p = this; p instanceof View; p = ((View) p).getParent()) {
+            sx *= ((View) p).getScaleX();
+            sy *= ((View) p).getScaleY();
+        }
+        int sw = Main.screenWidth(), sh = Main.screenHeight();
+        if (sw <= 0 || sh <= 0 || !(sx > 0f) || !(sy > 0f)) {
+            return new RectF(0f, 0f, getWidth(), getHeight());
+        }
+        int[] loc = new int[2];
+        getLocationOnScreen(loc);
+        float left = -loc[0] / sx, top = -loc[1] / sy;
+        return new RectF(left, top, left + sw / sx, top + sh / sy);
+    }
 
     private float fadeFraction() {
         if (previous == null) return 1f;
