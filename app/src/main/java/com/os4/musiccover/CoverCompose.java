@@ -167,6 +167,24 @@ final class CoverCompose {
         return out;
     }
 
+    /** Card mode uses the same mirrored, softened artwork as the full-cover backdrop. */
+    static Bitmap cardBackground(Bitmap src, int w, int h) {
+        Bitmap backdrop = mirroredBackground(src, w, h, 0.5f);
+        Bitmap soft = blur(backdrop, 48, 4, 3);
+        try {
+            Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas cv = new android.graphics.Canvas(out);
+            android.graphics.Paint p = new android.graphics.Paint(
+                    android.graphics.Paint.FILTER_BITMAP_FLAG);
+            cv.drawBitmap(soft, null, new android.graphics.RectF(0, 0, w, h), p);
+            cv.drawColor(0x14000000);
+            return out;
+        } finally {
+            if (soft != backdrop) soft.recycle();
+            backdrop.recycle();
+        }
+    }
+
     /**
      * The quarter-size backdrop the composition blurs: the artwork at its place in the layout,
      * mirrored away from there until it fills the screen.

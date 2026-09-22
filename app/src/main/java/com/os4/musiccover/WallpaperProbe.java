@@ -101,6 +101,8 @@ public class WallpaperProbe {
      * card blur sample it too - which is the whole point of coming into this process.
      */
     private static volatile Bitmap sArt;
+    /** Which of the two cover compositions the current source represents. */
+    private static volatile boolean sCardMode;
 
     /**
      * SystemUI is showing lyrics over the cover, so the cover is drawn frosted - blurred and
@@ -1188,11 +1190,13 @@ public class WallpaperProbe {
         // The source, when the last cover came that way: the JPEG is deleted as soon as a
         // composed-here cover is shown, so whichever of the two is newer is the one on screen.
         File src = new File(ctx.getFilesDir(), SRC_FILE);
+        sCardMode = new File(ctx.getFilesDir(), "mc_card_mode").exists();
         if (src.exists() && (!f.exists() || src.lastModified() >= f.lastModified())) {
             try {
                 CoverCompose.Source s = CoverCompose.readSource(src);
                 if (s != null) {
-                    sArt = CoverCompose.composeWallpaper(s.src, s.w, s.h, s.bias);
+                    sArt = sCardMode ? CoverCompose.cardBackground(s.src, s.w, s.h)
+                            : CoverCompose.composeWallpaper(s.src, s.w, s.h, s.bias);
                     sAsks = 0;
                     Xp.log(TAG + "art restored from the saved source " + describe(sArt));
                     return;
@@ -1814,6 +1818,7 @@ public class WallpaperProbe {
                                 + " (surface " + sSurfaceW + "x" + sSurfaceH + ")");
                         reloadTexture();
                     } else if ("art".equals(op)) {
+                        sCardMode = i.getBooleanExtra("cardmode", false);
                         final Context cc = c;
                         boolean reload = i.getBooleanExtra("reload", false);
                         // A fade needs both ends of it in this process. Missing either one is
@@ -1857,6 +1862,7 @@ public class WallpaperProbe {
                                 sFittedOf = null;
                                 new File(c.getFilesDir(), ART_FILE).delete();
                                 new File(c.getFilesDir(), SRC_FILE).delete();
+                                new File(c.getFilesDir(), "mc_card_mode").delete();
                                 videoWindowTakeover(true);
                                 return;
                             }
@@ -1894,6 +1900,7 @@ public class WallpaperProbe {
                                         sFittedOf = null;
                                         new File(cc.getFilesDir(), ART_FILE).delete();
                                         new File(cc.getFilesDir(), SRC_FILE).delete();
+                                        new File(cc.getFilesDir(), "mc_card_mode").delete();
                                         Xp.log(TAG + "art cleared");
                                     }
                                 });
@@ -1907,9 +1914,11 @@ public class WallpaperProbe {
                             }
                             new File(c.getFilesDir(), ART_FILE).delete();
                             new File(c.getFilesDir(), SRC_FILE).delete();
+                            new File(c.getFilesDir(), "mc_card_mode").delete();
                             Xp.log(TAG + "art cleared");
                         } else if (i.hasExtra("src")) {
-                            composeFromSource(c, i.getStringExtra("src"), reload, fade);
+                            composeFromSource(c, i.getStringExtra("src"), reload, fade,
+                                    sCardMode);
                             return;
                         } else {
                             byte[] jpg = i.getByteArrayExtra("jpg");
@@ -2241,7 +2250,8 @@ public class WallpaperProbe {
      * for, and a fast skip lands this while the previous track's fade is still running.
      */
     private static void composeFromSource(final Context c, final String path,
-                                          final boolean reload, final boolean fade) {
+                                          final boolean reload, final boolean fade,
+                                          final boolean cardMode) {
         final int seq = ++sSrcSeq;
         final long t0 = SystemClock.uptimeMillis();
         composer().post(new Runnable() {
@@ -2259,7 +2269,8 @@ public class WallpaperProbe {
                     read = SystemClock.uptimeMillis();
                     sTmRead = read;
                     if (seq != sSrcSeq) return;
-                    b = CoverCompose.composeWallpaper(s.src, s.w, s.h, s.bias);
+                    b = cardMode ? CoverCompose.cardBackground(s.src, s.w, s.h)
+                            : CoverCompose.composeWallpaper(s.src, s.w, s.h, s.bias);
                     composed = SystemClock.uptimeMillis();
                     sTmComposed = composed;
                     // Under the lyrics the picture that actually goes up is the frosted copy, and
@@ -2272,10 +2283,11 @@ public class WallpaperProbe {
                         // Built from the source and the layout, not from `b` - see
                         // CoverCompose.frostedFor() - but cached under `b`, which is what every
                         // reader asks with once this becomes the art.
-                        cacheFrosted(b, CoverCompose.frostedFor(s.src, s.w, s.h, s.bias));
+                        cacheFrosted(b, CoverCompose.frostedFor(s.src, s.w, s.h,
+                                cardMode ? 0.5f : s.bias));
                     }
                     sTmFrosted = SystemClock.uptimeMillis();
-                    saveSourceLater(c, s);
+                    saveSourceLater(c, s, cardMode);
                 } catch (Throwable t) {
                     Xp.log(TAG + "composing from the source failed: " + t);
                     return;
@@ -2300,7 +2312,8 @@ public class WallpaperProbe {
     }
 
     /** This process's own copy of the source, for its next cold start. Low priority, later. */
-    private static void saveSourceLater(final Context c, final CoverCompose.Source s) {
+    private static void saveSourceLater(final Context c, final CoverCompose.Source s,
+                                        final boolean cardMode) {
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -2308,6 +2321,9 @@ public class WallpaperProbe {
                 try {
                     CoverCompose.writeSource(new File(c.getFilesDir(), SRC_FILE),
                             s.src, s.w, s.h, s.bias);
+                    File marker = new File(c.getFilesDir(), "mc_card_mode");
+                    if (cardMode) marker.createNewFile();
+                    else marker.delete();
                 } catch (Throwable t) {
                     Xp.log(TAG + "saving the source failed: " + t);
                 }

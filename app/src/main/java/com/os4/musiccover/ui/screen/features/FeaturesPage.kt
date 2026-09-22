@@ -252,6 +252,10 @@ internal fun CoverPageView(
             LockPreview(
                 art = art,
                 bias = module.bias,
+                coverStyle = module.coverStyle,
+                coverCardSizeDp = module.coverCardSizeDp,
+                coverCardMarginDp = module.coverCardMarginDp,
+                coverCardOffsetDp = module.coverCardOffsetDp,
                 clockHeightDp = module.clockHeightDp,
                 clockSize = module.clockSize,
                 clockOffsetDp = module.clockOffsetDp,
@@ -302,16 +306,83 @@ private fun CoverGroup(
     onChange: (ModuleBridge.State) -> Unit,
 ) {
     val context = LocalContext.current
-    ValueSlider(
-        title = stringResource(R.string.cover_bias),
-        value = module.bias,
-        valueRange = 0f..1f,
-        enabled = enabled,
-        onValueChange = {
-            onChange(module.copy(bias = it))
-            ModuleBridge.setBias(context, it)
-        },
-    )
+    Column {
+        WindowDropdownPreference(
+            title = stringResource(R.string.cover_style),
+            summary = stringResource(R.string.cover_style_summary),
+            items = listOf(stringResource(R.string.cover_style_full),
+                stringResource(R.string.cover_style_card)),
+            selectedIndex = module.coverStyle.coerceIn(0, 1),
+            enabled = enabled,
+            onSelectedIndexChange = {
+                onChange(module.copy(coverStyle = it))
+                ModuleBridge.setCoverStyle(context, "mode", it.toFloat())
+            },
+        )
+        if (module.coverStyle == 0) {
+            ValueSlider(
+                title = stringResource(R.string.cover_bias),
+                summary = stringResource(R.string.cover_bias_summary),
+                value = module.bias,
+                valueRange = 0f..1f,
+                enabled = enabled,
+                onValueChange = {
+                    onChange(module.copy(bias = it))
+                    ModuleBridge.setBias(context, it)
+                },
+            )
+        } else {
+            SwitchPreference(
+                title = stringResource(R.string.cover_card_aod),
+                summary = stringResource(R.string.cover_card_aod_summary),
+                checked = module.coverCardAod,
+                enabled = enabled,
+                onCheckedChange = {
+                    onChange(module.copy(coverCardAod = it))
+                    ModuleBridge.setCoverCardAod(context, it)
+                },
+            )
+            ValueSlider(
+                title = stringResource(R.string.cover_card_size),
+                summary = stringResource(R.string.cover_card_size_summary),
+                value = module.coverCardSizeDp.coerceIn(120f, 420f),
+                valueRange = 120f..420f,
+                enabled = enabled,
+                label = { "${it.roundToInt()} dp" },
+                onValueChange = {
+                    val value = it.roundToInt().toFloat()
+                    onChange(module.copy(coverCardSizeDp = value))
+                    ModuleBridge.setCoverStyle(context, "size", value)
+                },
+            )
+            ValueSlider(
+                title = stringResource(R.string.cover_card_margin),
+                summary = stringResource(R.string.cover_card_margin_summary),
+                value = module.coverCardMarginDp.coerceIn(8f, 48f),
+                valueRange = 8f..48f,
+                enabled = enabled,
+                label = { "${it.roundToInt()} dp" },
+                onValueChange = {
+                    val value = it.roundToInt().toFloat()
+                    onChange(module.copy(coverCardMarginDp = value))
+                    ModuleBridge.setCoverStyle(context, "margin", value)
+                },
+            )
+            ValueSlider(
+                title = stringResource(R.string.cover_card_offset),
+                summary = stringResource(R.string.cover_card_offset_summary),
+                value = module.coverCardOffsetDp.coerceIn(-120f, 120f),
+                valueRange = -120f..120f,
+                enabled = enabled,
+                label = { "${it.roundToInt()} dp" },
+                onValueChange = {
+                    val value = it.roundToInt().toFloat()
+                    onChange(module.copy(coverCardOffsetDp = value))
+                    ModuleBridge.setCoverStyle(context, "offset", value)
+                },
+            )
+        }
+    }
 }
 
 @Composable
@@ -532,6 +603,71 @@ private fun LyricsGroup(
             onCheckedChange = {
                 onChange(module.copy(lyrics = it))
                 ModuleBridge.setLyrics(context, it)
+            },
+        )
+        ValueSlider(
+            title = stringResource(R.string.lyric_window_offset),
+            summary = stringResource(R.string.lyric_window_offset_summary),
+            value = module.lyricOffsetDp.coerceIn(-80f, 80f),
+            valueRange = -80f..80f,
+            enabled = enabled && module.lyrics,
+            label = { "${it.roundToInt()} dp" },
+            onValueChange = {
+                val value = it.roundToInt().toFloat()
+                onChange(module.copy(lyricOffsetDp = value))
+                ModuleBridge.setLyricStyle(context, "offset", value)
+            },
+        )
+        ValueSlider(
+            title = stringResource(R.string.lyric_vertical_gap),
+            summary = stringResource(R.string.lyric_vertical_gap_summary),
+            value = module.lyricGapDp.coerceIn(0f, 48f),
+            valueRange = 0f..48f,
+            enabled = enabled && module.lyrics,
+            label = { "${it.roundToInt()} dp" },
+            onValueChange = {
+                val value = it.roundToInt().toFloat()
+                onChange(module.copy(lyricGapDp = value))
+                ModuleBridge.setLyricStyle(context, "gap", value)
+            },
+        )
+        ValueSlider(
+            title = stringResource(R.string.lyric_horizontal_margin),
+            summary = stringResource(R.string.lyric_horizontal_margin_summary),
+            value = module.lyricSideDp.coerceIn(0f, 64f),
+            valueRange = 0f..64f,
+            enabled = enabled && module.lyrics,
+            label = { "${it.roundToInt()} dp" },
+            onValueChange = {
+                val value = it.roundToInt().toFloat()
+                onChange(module.copy(lyricSideDp = value))
+                ModuleBridge.setLyricStyle(context, "side", value)
+            },
+        )
+        ValueSlider(
+            title = stringResource(R.string.lyric_font_size),
+            summary = stringResource(R.string.lyric_font_size_summary),
+            value = module.lyricSizeSp.coerceIn(18f, 36f),
+            valueRange = 18f..36f,
+            enabled = enabled && module.lyrics,
+            label = { "${it.roundToInt()} sp" },
+            onValueChange = {
+                val value = it.roundToInt().toFloat()
+                onChange(module.copy(lyricSizeSp = value))
+                ModuleBridge.setLyricStyle(context, "size", value)
+            },
+        )
+        ValueSlider(
+            title = stringResource(R.string.lyric_font_weight),
+            summary = stringResource(R.string.lyric_font_weight_summary),
+            value = module.lyricWeight.coerceIn(300, 900).toFloat(),
+            valueRange = 300f..900f,
+            enabled = enabled && module.lyrics,
+            label = { "${(it.roundToInt() / 100) * 100}" },
+            onValueChange = {
+                val value = ((it.roundToInt() + 50) / 100 * 100).coerceIn(300, 900)
+                onChange(module.copy(lyricWeight = value))
+                ModuleBridge.setLyricStyle(context, "weight", value.toFloat())
             },
         )
         SwitchPreference(

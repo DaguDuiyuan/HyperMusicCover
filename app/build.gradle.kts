@@ -124,4 +124,6 @@ dependencies {
     implementation(libs.miuix.icons)
     implementation(libs.miuix.squircle)
     implementation(libs.material.icons.extended)
+
+    testImplementation("junit:junit:4.13.2")
 }

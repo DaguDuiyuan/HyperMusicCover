@@ -76,6 +76,10 @@ import kotlin.math.roundToInt
 fun LockPreview(
     art: Bitmap?,
     bias: Float,
+    coverStyle: Int,
+    coverCardSizeDp: Float,
+    coverCardMarginDp: Float,
+    coverCardOffsetDp: Float,
     clockHeightDp: Float,
     clockSize: Float,
     clockOffsetDp: Float,
@@ -125,10 +129,11 @@ fun LockPreview(
     // for differences below what a thumbnail can show. A step of 1/200 of the screen height is
     // still finer than one pixel of the preview.
     val biasStep = (bias * 200f).roundToInt()
-    val layers = remember(cover, biasStep, screenW, screenH) {
+    val layers = remember(cover, biasStep, coverStyle, screenW, screenH) {
         val w = PREVIEW_PX
         val h = (w * screenH / screenW.toFloat()).roundToInt()
-        val paper = composePreview(cover, w, h, biasStep / 200f, w / screenW.toFloat())
+        val paper = if (coverStyle == 1) composeCardBackdrop(cover, w, h)
+                else composePreview(cover, w, h, biasStep / 200f, w / screenW.toFloat())
         // The card's own background is a hardware blur of whatever is behind it, and a hardware
         // blur draws nothing into the software canvas the module captures with - the captured
         // card comes back as text and buttons on transparency. So the frosting is rebuilt here,
@@ -157,6 +162,11 @@ fun LockPreview(
                 dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
                 filterQuality = FilterQuality.High,
             )
+            if (coverStyle == 1) {
+                drawSquareCover(cover, k, screenW, screenH, geometry, shownCard,
+                    clockHeightDp, clockSize, clockOffsetDp,
+                    coverCardSizeDp, coverCardMarginDp, coverCardOffsetDp)
+            }
             // Under the clock, as on the phone: the card is part of the notification area and
             // the collapsed clock sits above it, but a tall cover can bring them close.
             drawFrostedPanel(shownCard, k, frosted,
@@ -180,6 +190,89 @@ fun LockPreview(
             }
         }
     }
+}
+
+/** The same safe square rule as CoverCardStyle.place, drawn in the preview's scaled pixels. */
+private fun DrawScope.drawSquareCover(
+    cover: Bitmap,
+    k: Float,
+    screenW: Int,
+    screenH: Int,
+    geometry: ModuleBridge.Geometry,
+    media: ModuleBridge.Shot?,
+    clockHeightDp: Float,
+    clockSize: Float,
+    clockOffsetDp: Float,
+    sizeDp: Float,
+    marginDp: Float,
+    offsetDp: Float,
+) {
+    val density = 1.dp.toPx()
+    val gap = marginDp.coerceIn(8f, 48f) * density
+    val clockBottom = if (geometry.hasClock) {
+        geometry.clockY + clockOffsetDp * density +
+            geometry.clockH * collapseScale(geometry, clockHeightDp, clockSize)
+    } else screenH * 0.18f
+    val top = clockBottom.coerceAtLeast(0f) + gap
+    val bottom = (if (media != null && media.t > screenH / 3)
+        media.t.toFloat() else screenH * 0.70f) - gap
+    val side = min(sizeDp.coerceIn(120f, 420f) * density,
+        min(screenW - 2f * gap, bottom - top))
+    if (side < 96f * density) return
+    val center = (top + bottom) / 2f + offsetDp.coerceIn(-120f, 120f) * density
+    val y = (center - side / 2f).coerceIn(top, bottom - side)
+    val rect = Rect((screenW - side) * k / 2f, y * k,
+        (screenW + side) * k / 2f, (y + side) * k)
+    val radius = min(20f * density, side * 0.10f) * k
+    val outline = Path().apply { addRoundRect(RoundRect(rect, CornerRadius(radius))) }
+    val crop = min(cover.width, cover.height)
+    val left = (cover.width - crop) / 2
+    val cropTop = (cover.height - crop) / 2
+    clipPath(outline) {
+        drawImage(cover.asImageBitmap(),
+            srcOffset = IntOffset(left, cropTop),
+            srcSize = IntSize(crop, crop),
+            dstOffset = IntOffset(rect.left.roundToInt(), rect.top.roundToInt()),
+            dstSize = IntSize(rect.width.roundToInt().coerceAtLeast(1),
+                rect.height.roundToInt().coerceAtLeast(1)),
+            filterQuality = FilterQuality.High)
+    }
+    drawPath(outline, Color.White.copy(alpha = 0.25f), style = Stroke(1.dp.toPx()))
+}
+
+/** A small preview of the card's mirrored, static album-art blur. */
+private fun composeCardBackdrop(src: Bitmap, w: Int, h: Int): Bitmap {
+    val bw = max(1, w / 4)
+    val bh = max(1, h / 4)
+    val bandH = max(1f, src.height * bw / src.width.toFloat())
+    val bandTop = (bh - bandH) * 0.5f
+    val bg = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+    val canvasBg = Canvas(bg)
+    val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    canvasBg.drawBitmap(src, null, RectF(0f, bandTop, bw.toFloat(), bandTop + bandH), paint)
+    val tiles = min(64, kotlin.math.ceil(bh / bandH).toInt() + 1)
+    for (i in 1..tiles) {
+        for (y in floatArrayOf(bandTop + i * bandH, bandTop - i * bandH)) {
+            canvasBg.save()
+            if (i % 2 == 1) {
+                canvasBg.translate(0f, y + bandH)
+                canvasBg.scale(1f, -1f)
+                canvasBg.drawBitmap(src, null, RectF(0f, 0f, bw.toFloat(), bandH), paint)
+            } else {
+                canvasBg.drawBitmap(src, null, RectF(0f, y, bw.toFloat(), y + bandH), paint)
+            }
+            canvasBg.restore()
+        }
+    }
+    val soft = boxBlur(bg, 4, 3)
+    bg.recycle()
+    val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(out)
+    canvas.drawBitmap(soft, null, android.graphics.Rect(0, 0, w, h),
+        Paint(Paint.FILTER_BITMAP_FLAG))
+    canvas.drawColor(0x14000000)
+    soft.recycle()
+    return out
 }
 
 /**
