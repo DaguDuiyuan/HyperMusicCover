@@ -109,8 +109,8 @@ final class LyricSource {
      * How many lines a session payload must carry before it counts as this song's lyric.
      *
      * Two. One line is never a lyric file - it is the line being sung, or a placeholder like
-     * NetEase's "纯音乐，请欣赏" - and the smallest genuine
-     * payload measured here was eighteen lines, so there is nothing in between to get wrong.
+     * NetEase's "纯音乐，请欣赏" - and the smallest genuine payload measured here was eighteen
+     * lines, so there is nothing in between to get wrong.
      */
     private static final int MIN_SESSION_LINES = 2;
 
@@ -120,16 +120,15 @@ final class LyricSource {
      * A track change is the one moment this field cannot be believed, and it is the only moment
      * anyone reads it. The player rewrites the metadata and the lyric as two separate updates,
      * so between them the session carries the new song's title over the old song's lyric.
-     * Measured 2026-09-20 on NetEase: one track was read 1ms after the card reported it and
+     * Measured 2026-09-20 on NetEase: 以父之名 was read 1ms after the card reported it and
      * answered with a single line, which was then taken for that song's whole lyric, cached
      * under its key, and - being recorded as the session's own - locked every better route out
      * for the rest of the song. Five songs in one evening went that way.
      *
      * So the payload is asked which song it is for rather than assumed to be keeping up. Only a
      * positive contradiction rejects it: a payload with no songName is common and says nothing
-     * either way, and a title carries decorations the payload need not repeat - a name and the
-     * same name followed by "(Live)" are the same song - so one containing the other is
-     * agreement.
+     * either way, and a title carries decorations the payload need not repeat - "白色风车" and
+     * "白色风车 (Live)" are the same song - so one containing the other is agreement.
      */
     static String infoFor(MediaController c) {
         String info = lyricInfoOf(c);
@@ -290,7 +289,14 @@ final class LyricSource {
      * a while to turn up" this fixed.
      */
     private static String dirFor(MediaController c) {
-        String pkg = c == null ? "" : c.getPackageName();
+        return dirForPackage(c == null ? "" : c.getPackageName());
+    }
+
+    /** The same by package name, for a caller holding a queue rather than a session. */
+    static String dirForPackage(String pkg) {
+        if (pkg == null) {
+            return null;
+        }
         if (pkg.contains("apple")) {
             return "am-lyrics";
         }
@@ -392,9 +398,95 @@ final class LyricSource {
      */
     private static volatile int sLoadGen;
 
+    /**
+     * The same, for a lookup nobody is waiting for yet.
+     *
+     * Counted downwards so the two never collide: a real lookup's generation is always positive
+     * and a prefetch's always negative. They have to be separate numbers rather than one, because
+     * a prefetch outlives exactly the event that ends a real lookup - the track change it was
+     * fetched in anticipation of - and a shared counter would cancel every prefetch at the moment
+     * it became the answer.
+     */
+    private static volatile int sWarmGen;
+
     /** Whether a newer lookup has started, i.e. nothing this one finds will be shown. */
     private static boolean superseded(int gen) {
-        return gen != sLoadGen;
+        return gen < 0 ? gen != sWarmGen : gen != sLoadGen;
+    }
+
+    /**
+     * What a prefetch has already been told about a directory and id.
+     *
+     * Keyed the way the request is, not the way a track is: a queue item and the session that
+     * later reports the same track agree on the platform id and on nothing else reliably, so the
+     * id is the only thing both halves can be keyed on. Misses are kept as well as hits - a
+     * prefetch that proved the song is not in the database saves the real lookup the same four
+     * mirrors it would have raced to learn that.
+     */
+    private static final int WARM_MAX = 8;
+    private static final java.util.LinkedHashMap<String, Answer> WARM =
+            new java.util.LinkedHashMap<String, Answer>(WARM_MAX + 1, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, Answer> e) {
+                    return size() > WARM_MAX;
+                }
+            };
+
+    /**
+     * Fetches a track that has not been asked for yet, into the caches the real lookup reads.
+     *
+     * Nothing here is handed to anyone: both halves write into a cache and the lookup that
+     * follows the track change finds them there by its own ordinary route. That is the whole
+     * point - the prediction can be wrong, and a wrong one then costs a cache entry nobody ever
+     * looks up rather than a lyric on the wrong song.
+     *
+     * Blocking, and called on a thread of its own: the mirrors take seconds when they take
+     * anything, and the artwork prefetch shares neither the thread nor the wait.
+     */
+    static void warm(String id, String dir, String title, String artist) {
+        final int gen = --sWarmGen;
+        if (id != null && dir != null) {
+            String key = dir + '/' + id;
+            boolean have;
+            synchronized (WARM) {
+                have = WARM.containsKey(key);
+            }
+            if (!have) {
+                Answer a = fetch(gen, dir, id);
+                if (a.status != UNREACHABLE) {
+                    synchronized (WARM) {
+                        WARM.put(key, a);
+                    }
+                    Xp.log("[MCLyric] warmed " + key + ": "
+                            + (a.status == FOUND ? a.body.length() + " chars" : "not there"));
+                }
+            }
+        }
+        // Only the search, and only into NcmLyrics' own cache - the real lookup reads it there.
+        // Not the whole by-name lookup: choosing between the results needs the duration, which a
+        // queue item does not carry, and a choice made without one can land on another recording
+        // of the same song. The search does not need it, so the search is what is done early.
+        if (title != null) {
+            NcmLyrics.warmSearch(title, artist);
+        }
+    }
+
+    /** For op queue: what the database half of reading ahead is holding. */
+    static String describeWarm() {
+        synchronized (WARM) {
+            int found = 0;
+            for (Answer a : WARM.values()) {
+                if (a.status == FOUND) found++;
+            }
+            return "warmed=" + WARM.size() + "(" + found + " present)";
+        }
+    }
+
+    /** A prefetched answer for this directory and id, or null when there is none. */
+    private static Answer warmed(String dir, String id) {
+        synchronized (WARM) {
+            return WARM.get(dir + '/' + id);
+        }
     }
 
     /**
@@ -658,7 +750,11 @@ final class LyricSource {
             return;
         }
         try {
-            Answer a = fetch(gen, dir, id);
+            // What a prefetch already went and got, when the track that just started is one the
+            // queue saw coming. Nothing else changes: a miss here is an ordinary lookup.
+            Answer warm = warmed(dir, id);
+            if (warm != null) Xp.log("[MCLyric] " + dir + "/" + id + " was already fetched");
+            Answer a = warm != null ? warm : fetch(gen, dir, id);
             if (a.status != FOUND) {
                 r.why = join(before, a.status == MISSING
                         ? "not in " + dir + " (" + id + ")"

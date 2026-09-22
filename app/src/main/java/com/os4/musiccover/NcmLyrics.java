@@ -266,6 +266,110 @@ final class NcmLyrics {
     /** Set by the last request to fail on the network rather than on its answer. */
     private static volatile boolean networkFailed;
 
+    /**
+     * The search response for one set of terms, so it can be fetched before it is needed.
+     *
+     * This is the half of the lookup that can be done early, and the only one. The search takes
+     * the song's name and its first artist and nothing else - see terms() - which is exactly what
+     * a play queue's item carries, while the choosing below needs the duration, which no queue
+     * here publishes. So the prefetch asks the question and the real lookup, which by then has
+     * the duration, answers it: the matching runs at full strength on results that are already
+     * in hand. Nothing about which song gets picked changes; only when the bytes arrived does.
+     *
+     * Two minutes because that is far longer than the gap it exists to cover - a track starting
+     * after the queue said it would - and short enough that a spell of the endpoint answering
+     * with unrelated songs cannot be held over a song for long. See the re-ask in fetch().
+     */
+    private static final int SEARCH_CACHE_MAX = 8;
+    private static final long SEARCH_TTL_MS = 120000L;
+
+    private static final class Searched {
+        final String json;
+        final long at;
+
+        Searched(String json, long at) {
+            this.json = json;
+            this.at = at;
+        }
+    }
+
+    private static final Map<String, Searched> SEARCHES =
+            new LinkedHashMap<String, Searched>(SEARCH_CACHE_MAX + 1, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Searched> eldest) {
+                    return size() > SEARCH_CACHE_MAX;
+                }
+            };
+
+    /** The search response for these terms, from the prefetch if it got there first. */
+    private static String search(String terms, String url) throws Exception {
+        synchronized (SEARCHES) {
+            Searched s = SEARCHES.get(terms);
+            if (s != null && android.os.SystemClock.uptimeMillis() - s.at < SEARCH_TTL_MS) {
+                Xp.log("[MCNcm] search for \"" + terms + "\" was already done");
+                return s.json;
+            }
+        }
+        String json = get(url);
+        if (json != null) {
+            synchronized (SEARCHES) {
+                SEARCHES.put(terms, new Searched(json, android.os.SystemClock.uptimeMillis()));
+            }
+        }
+        return json;
+    }
+
+    private static void forgetSearch(String terms) {
+        synchronized (SEARCHES) {
+            SEARCHES.remove(terms);
+        }
+    }
+
+    /**
+     * Runs the search for a track that has not started yet, and keeps the answer.
+     *
+     * Takes the two fields rather than a Query because a prefetch has no duration to build one
+     * with - and needs none, which is the whole reason this half can be done early. Blocking;
+     * the caller is a prefetch thread.
+     */
+    static void warmSearch(String title, String artist) {
+        try {
+            Query q = build(title, artist, null, 0L);
+            if (q == null) {
+                return;
+            }
+            String terms = terms(q);
+            if (terms.isEmpty()) {
+                return;
+            }
+            synchronized (SEARCHES) {
+                Searched s = SEARCHES.get(terms);
+                if (s != null && android.os.SystemClock.uptimeMillis() - s.at < SEARCH_TTL_MS) {
+                    return;
+                }
+            }
+            long t0 = android.os.SystemClock.uptimeMillis();
+            String json = get(String.format(SEARCH, URLEncoder.encode(terms, "UTF-8")));
+            if (json == null) {
+                return;
+            }
+            synchronized (SEARCHES) {
+                SEARCHES.put(terms, new Searched(json, android.os.SystemClock.uptimeMillis()));
+            }
+            Xp.log("[MCNcm] searched \"" + terms + "\" ahead of time in "
+                    + (android.os.SystemClock.uptimeMillis() - t0) + "ms");
+        } catch (Throwable t) {
+            Xp.log("[MCNcm] searching ahead failed: " + t);
+        }
+    }
+
+    /** For op queue: whether reading ahead has anything in hand. */
+    static String describeSearches() {
+        synchronized (SEARCHES) {
+            return "searches=" + SEARCHES.size();
+        }
+    }
+
     private static Found fetch(Query q) throws Exception {
         networkFailed = false;
         String terms = terms(q);
@@ -274,7 +378,7 @@ final class NcmLyrics {
         }
         long started = android.os.SystemClock.uptimeMillis();
         String url = String.format(SEARCH, URLEncoder.encode(terms, "UTF-8"));
-        String json = get(url);
+        String json = search(terms, url);
         if (json == null) {
             return null;
         }
@@ -287,6 +391,11 @@ final class NcmLyrics {
         // with it a song that genuinely is not there costs one extra request, once.
         if (id == null && q.durationMs > 0 && !norm(q.title).isEmpty()) {
             Xp.log("[MCNcm] nothing in the results for " + q + "; asking again");
+            // get, not search: the point of asking again is to get a DIFFERENT answer, and a
+            // cached one is the same answer by definition. The entry goes too - whatever it
+            // holds has just been shown to prove nothing, and leaving it would hand the same
+            // uselessness to the next lookup that searches these terms.
+            forgetSearch(terms);
             json = get(url);
             if (json == null) {
                 return null;

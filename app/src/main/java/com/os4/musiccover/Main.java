@@ -8353,6 +8353,30 @@ public class Main extends XposedModule {
                 else sb.append("none");
                 sb.append(" iconUri=").append(d.getIconUri());
                 sb.append(" mediaId=").append(d.getMediaId());
+                // The three fields a by-name lyric search needs, and where the only one of them
+                // that has no field of its own could be hiding. Printed rather than assumed:
+                // whether the read-ahead can ask the by-name half at all is decided entirely by
+                // whether the player fills these in, and that cannot be reasoned about.
+                sb.append("\n      subtitle=").append(d.getSubtitle())
+                        .append(" description=").append(d.getDescription());
+                android.os.Bundle ex = null;
+                try {
+                    ex = d.getExtras();
+                } catch (Throwable ignored) {
+                }
+                if (ex == null || ex.isEmpty()) {
+                    sb.append(" extras=none");
+                } else {
+                    sb.append(" extras={");
+                    for (String k : ex.keySet()) {
+                        Object v = ex.get(k);
+                        String s = v == null ? "null" : v.toString();
+                        sb.append(k).append('=')
+                                .append(s.length() > 60 ? s.substring(0, 60) + "..." : s)
+                                .append(' ');
+                    }
+                    sb.append('}');
+                }
             }
         }
         return sb.toString();
