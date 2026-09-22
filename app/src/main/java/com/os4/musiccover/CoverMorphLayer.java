@@ -100,6 +100,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         }
         // bringToFront lays the parent out again too: only when something has come above it.
         if (root.getChildAt(root.getChildCount() - 1) != v) v.bringToFront();
+        Main.cardNote("morph begin toCover=" + toCover);
         v.reset(art, Main.coverMorphCardMode(), thumb, cover, toCover);
         v.setVisibility(VISIBLE);
         v.running = true;
@@ -166,6 +167,9 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         if (!running) return;
         if (!isAttachedToWindow() || !Main.coverMorphStillEligible()
                 || getParent() != Main.coverMorphRoot()) {
+            Main.cardNote("morph ineligible attached=" + isAttachedToWindow() + " eligible="
+                    + Main.coverMorphStillEligible() + " sameRoot="
+                    + (getParent() == Main.coverMorphRoot()) + " " + Main.cardVisibleWhy());
             finish();
             return;
         }
@@ -261,6 +265,14 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
 
     private void finish() {
         if (!running) return;
+        StackTraceElement[] st = new Throwable().getStackTrace();
+        StringBuilder why = new StringBuilder("morph end v=").append(motion.value)
+                .append(" t=").append(motion.target).append(" by");
+        for (int i = 1; i < Math.min(st.length, 5); i++) {
+            why.append(' ').append(st[i].getClassName()).append('.')
+                    .append(st[i].getMethodName()).append(':').append(st[i].getLineNumber());
+        }
+        Main.cardNote(why.toString());
         running = false;
         Choreographer.getInstance().removeFrameCallback(this);
         setRequestedFrameRate(0f);

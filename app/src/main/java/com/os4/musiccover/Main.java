@@ -1999,7 +1999,11 @@ public class Main extends XposedModule {
                         // "the card stayed small", where the log is not there to read.
                         MediaController w = sWatched;
                         PlaybackState ps = w == null ? null : w.getPlaybackState();
-                        setResultData("toggles=[" + toggleCost() + "] session="
+                        String notes;
+                        synchronized (sCardNotes) {
+                            notes = sCardNotes.toString();
+                        }
+                        setResultData("notes=[" + notes + "] toggles=[" + toggleCost() + "] session="
                                 + (ps == null ? "none" : ps.getState())
                                 + " playing=" + sCoverCardPlaying + " "
                                 + CoverCardLayer.describe());
@@ -5565,6 +5569,28 @@ public class Main extends XposedModule {
     /** The card's progress into the cover look, as last written. */
     static float cardProgress() {
         return sCardP;
+    }
+
+    /**
+     * A short diary of the square and the morph, newest last, for `op cardstate`: this phone
+     * keeps no module log, and "the copy vanished and the square came late" needs the order.
+     */
+    private static final StringBuilder sCardNotes = new StringBuilder();
+
+    static void cardNote(String what) {
+        synchronized (sCardNotes) {
+            sCardNotes.append(android.os.SystemClock.uptimeMillis() % 100000L).append(' ')
+                    .append(what).append(" | ");
+            if (sCardNotes.length() > 1800) sCardNotes.delete(0, sCardNotes.length() - 1800);
+        }
+    }
+
+    /** Which of coverCardVisible()'s questions is saying no, for the diary. */
+    static String cardVisibleWhy() {
+        View c = sContainer;
+        return "cover=" + sCoverMode + " phase=" + ClockCollapse.phase()
+                + " kg=" + keyguardShowing() + " shown=" + (c != null && c.isShown())
+                + " on=" + sScreenOn + " bouncer=" + bouncerShown();
     }
 
     static boolean coverCardVisible() {
