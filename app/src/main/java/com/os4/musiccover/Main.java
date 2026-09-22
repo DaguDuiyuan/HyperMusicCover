@@ -7480,17 +7480,27 @@ public class Main extends XposedModule {
         onMediaUpdate();
     }
 
+    private static final Runnable sRecheckPlayback = new Runnable() {
+        @Override
+        public void run() {
+            MediaController w = sWatched;
+            updateCoverCardPlayback(w == null ? null : w.getPlaybackState());
+        }
+    };
+
     private static void updateCoverCardPlayback(PlaybackState state) {
         int s = state == null ? PlaybackState.STATE_NONE : state.getState();
-        // A skip passes through SKIPPING/BUFFERING/CONNECTING on its way to the next track. Those
-        // are not a pause: taking them as one shrank the card on every skip, and a fast run of
-        // skips could end on one of them and leave it small while the music played.
-        if (s == PlaybackState.STATE_BUFFERING || s == PlaybackState.STATE_CONNECTING
+        // A skip passes through SKIPPING/BUFFERING/CONNECTING on its way to the next track. The
+        // card dips for it on purpose, but nothing promises the PLAYING that ends it reaches us -
+        // a fast run of skips left the card small while the music played. So a state like that
+        // asks the session again shortly, until it has settled somewhere.
+        boolean passing = s == PlaybackState.STATE_BUFFERING
+                || s == PlaybackState.STATE_CONNECTING
                 || s == PlaybackState.STATE_SKIPPING_TO_NEXT
                 || s == PlaybackState.STATE_SKIPPING_TO_PREVIOUS
-                || s == PlaybackState.STATE_SKIPPING_TO_QUEUE_ITEM
-                || s == PlaybackState.STATE_REWINDING
-                || s == PlaybackState.STATE_FAST_FORWARDING) return;
+                || s == PlaybackState.STATE_SKIPPING_TO_QUEUE_ITEM;
+        main().removeCallbacks(sRecheckPlayback);
+        if (passing) main().postDelayed(sRecheckPlayback, 400L);
         boolean playing = s == PlaybackState.STATE_PLAYING;
         if (sCoverCardPlaying == playing) return;
         sCoverCardPlaying = playing;

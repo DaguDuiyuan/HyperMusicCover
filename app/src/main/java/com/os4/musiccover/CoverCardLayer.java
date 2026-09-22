@@ -383,7 +383,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (phase == ClockCollapse.Phase.AOD) scale.snap(scaleTarget);
         else scale.step(scaleTarget, dt);
         if (previous != null && (phase == ClockCollapse.Phase.AOD
-                || SystemClock.uptimeMillis() - changedAt > 600L)) {
+                || SystemClock.uptimeMillis() - changedAt > TRACK_FADE_MS)) {
             previous.recycle();
             previous = null;
         }
@@ -498,10 +498,17 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         return new RectF(left, top, left + sw / sx, top + sh / sy);
     }
 
+    /**
+     * The same crossfade the wallpaper runs under it on a track change - WallpaperProbe's
+     * sTrackFadeMs and its cubic ease-out - so the square and its blurred backdrop turn over
+     * together instead of the art lagging the background by 400ms.
+     */
+    private static final long TRACK_FADE_MS = 180L;
+
     private float fadeFraction() {
         if (previous == null) return 1f;
-        float f = Math.min(1f, (SystemClock.uptimeMillis() - changedAt) / 600f);
-        return f * f * (3f - 2f * f);
+        float t = Math.min(1f, (SystemClock.uptimeMillis() - changedAt) / (float) TRACK_FADE_MS);
+        return 1f - (1f - t) * (1f - t) * (1f - t);
     }
 
     private void drawArt(Canvas canvas, Prepared p, float fraction) {
