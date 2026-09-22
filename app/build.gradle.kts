@@ -108,6 +108,9 @@ dependencies {
     // loaded into SystemUI when the module is - see LyricProbe, which is why it has to stay
     // dependency-light and Android-free.
     implementation(libs.lyrics.core)
+    // The lyric bridge the LyricProvider plugins publish through. Optional at runtime: when
+    // nothing on the device implements it, LyriconSource simply never connects.
+    implementation(libs.lyricon.subscriber)
 
     // The release notes are Markdown and are rendered as such in the update dialog.
     implementation(libs.commonmark)

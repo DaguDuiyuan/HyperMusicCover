@@ -813,6 +813,15 @@ public class Main extends XposedModule {
                 } catch (Throwable t) {
                     Xp.log(TAG + "registerReceiver failed: " + t);
                 }
+                // The lyric bridge, from the same place and for the same reason: this is where
+                // the process first has a Context. It does nothing at all when no bridge is
+                // installed, and a second call is a no-op, so it rides along with the keyguard
+                // being rebuilt rather than needing a moment of its own.
+                try {
+                    LyriconSource.attach(sContainer.getContext().getApplicationContext());
+                } catch (Throwable t) {
+                    Xp.log(TAG + "Lyricon attach failed: " + t);
+                }
                 // The keyguard is rebuilt on some transitions, taking our cover with it, so
                 // re-attach rather than assume the view is still in the tree.
                 if (sCoverWanted) {
@@ -1940,6 +1949,8 @@ public class Main extends XposedModule {
                         } catch (Throwable t) {
                             setResultData("lyricraw failed: " + t);
                         }
+                    } else if ("lyricon".equals(op)) {
+                        setResultData(LyriconSource.describe());
                     } else if ("local".equals(op)) {
                         // On a worker: this one reads the media database and then the file, and
                         // a broadcast receiver runs on the main thread.

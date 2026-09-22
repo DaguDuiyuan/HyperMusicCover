@@ -44,6 +44,8 @@ final class LyricSource {
     static final int SRC_LYRIC_INFO = 1;
     /** The file being played carried its own lyric - a .lrc beside it, or its own tag. */
     static final int SRC_LOCAL = 6;
+    /** A LyricProvider plugin, through the Lyricon bridge this module subscribes to. */
+    static final int SRC_LYRICON = 7;
     /** The AMLL database, keyed by the platform's song id. */
     static final int SRC_DATABASE = 2;
     /** Found by name on NetEase - the fallback for a session carrying neither of the above. */
@@ -725,6 +727,13 @@ final class LyricSource {
                 if (info != null) {
                     session(info, r);
                 }
+                // The bridge, when the session had nothing. Same standing as the session's own
+                // payload and for the same reason - both are the player's lyric, handed over by
+                // whoever managed to reach it - so it is asked here rather than below the file,
+                // and what it brings is word-timed often enough to keep the file out.
+                if (r.lines.isEmpty()) {
+                    lyricon(controller, r);
+                }
                 // The file's own lyric, which outranks what the session is carrying - with one
                 // exception, and the exception is the reason the session is read first at all.
                 //
@@ -943,6 +952,33 @@ final class LyricSource {
             Xp.log("[MCLyric] lyricInfo parse failed: " + t);
             r.lines = java.util.Collections.emptyList();
             r.why = "lyricInfo parse error";
+        }
+    }
+
+    /**
+     * The Lyricon bridge's copy, if a LyricProvider plugin is publishing one for this track.
+     *
+     * Nothing about this route is asked for: the subscriber holds whatever the active player
+     * last published, so this is a read of something already in memory - no network, no parse,
+     * no waiting. A device with no bridge installed never connects and this always answers
+     * nothing, which is why it can sit in the waterfall unconditionally.
+     */
+    private static void lyricon(MediaController c, Rows r) {
+        String before = r.why;
+        try {
+            MediaMetadata md = c == null ? null : c.getMetadata();
+            String title = md == null ? null : md.getString(MediaMetadata.METADATA_KEY_TITLE);
+            String artist = md == null ? null : md.getString(MediaMetadata.METADATA_KEY_ARTIST);
+            List<LyricLine> lines = LyriconSource.linesFor(title, artist);
+            if (lines == null || lines.isEmpty()) {
+                return;
+            }
+            r.lines = lines;
+            r.source = SRC_LYRICON;
+            r.why = lines.size() + " lines from the Lyricon bridge";
+        } catch (Throwable t) {
+            Xp.log("[MCLyric] the Lyricon bridge failed: " + t);
+            r.why = join(before, "Lyricon error");
         }
     }
 

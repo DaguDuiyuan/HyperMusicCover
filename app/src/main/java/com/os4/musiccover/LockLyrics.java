@@ -692,6 +692,8 @@ final class LockLyrics {
                 return "session";
             case LyricSource.SRC_LOCAL:
                 return "local";
+            case LyricSource.SRC_LYRICON:
+                return "lyricon";
             case LyricSource.SRC_DATABASE:
                 return "amll";
             case LyricSource.SRC_NETEASE:

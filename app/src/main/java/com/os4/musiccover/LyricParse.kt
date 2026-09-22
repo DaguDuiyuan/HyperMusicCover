@@ -189,7 +189,7 @@ object LyricParse {
      * what a wholly untimed tail looks like - divide that stretch between them, rather than
      * crossing together, so the fill still moves through them one at a time.
      */
-    private fun closeUntimedTail(starts: IntArray, ends: IntArray, lineEnd: Int) {
+    internal fun closeUntimedTail(starts: IntArray, ends: IntArray, lineEnd: Int) {
         var k = 0
         while (k < starts.size) {
             if (ends[k] > starts[k]) {
