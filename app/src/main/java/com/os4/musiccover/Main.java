@@ -6287,8 +6287,11 @@ public class Main extends XposedModule {
             if (CoverMorphLayer.active()) {
                 // The moving copy owns these pixels until it reaches either endpoint. Keep the
                 // OEM view in the layout so its slot and the title continue to move normally.
+                // On the way back it fades in under the landing copy instead of being switched on
+                // at the end: the copy hides its pixels, but not its shadow, which popped in.
                 if (art.getVisibility() != View.VISIBLE) art.setVisibility(View.VISIBLE);
-                if (art.getAlpha() != 0f) art.setAlpha(0f);
+                float a = Math.min(1f - hideP, CoverMorphLayer.thumbAlpha());
+                if (art.getAlpha() != a) art.setAlpha(a);
             }
         }
         centreCardText(card, (TextView) sCardTitle, centreP);

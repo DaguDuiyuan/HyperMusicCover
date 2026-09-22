@@ -87,6 +87,22 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     }
 
     static boolean active() { return sView != null && sView.running; }
+
+    /** Progress below which the OEM thumbnail fades back in under a copy that is landing on it. */
+    private static final float THUMB_REVEAL = 0.3f;
+
+    /**
+     * The OEM thumbnail's alpha while a morph owns its pixels. Zero on the way out; on the way
+     * back it rises over the last stretch, so its own shadow comes in with it rather than all at
+     * once when this layer goes.
+     */
+    static float thumbAlpha() {
+        CoverMorphLayer v = sView;
+        if (v == null || !v.running) return 1f;
+        if (v.motion.target != 0f) return 0f;
+        float r = (THUMB_REVEAL - v.motion.value) / THUMB_REVEAL;
+        return Math.max(0f, Math.min(1f, r));
+    }
     static boolean cardSuppressed() { return active() && sView.cardMode; }
 
     static void cancel() {
@@ -121,6 +137,8 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
                 : Math.min(1f, Math.max(0f, (1f - motion.value) / 0.18f));
         fullAlpha += (desiredAlpha - fullAlpha) * Math.min(1f, dt * 20f);
         invalidate();
+        // The thumbnail's fade-in is written by the card's own pass; it needs a frame to run in.
+        if (motion.target == 0f && motion.value < THUMB_REVEAL) Main.refreshMediaCardForMorph();
         ClockCollapse.Phase phase = ClockCollapse.phase();
         boolean clockFlying = motion.target == 1f
                 ? phase == ClockCollapse.Phase.ENTER
