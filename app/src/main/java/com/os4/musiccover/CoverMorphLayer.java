@@ -36,7 +36,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
      * One per window, kept attached and INVISIBLE between morphs. Added at the start of every
      * morph and removed at its end, it asked for a layout of the whole shade window twice per
      * morph; VISIBLE and INVISIBLE only redraw. (Not the 25-35ms first frame of a tap toggle:
-     * a two-finger switch morphs the same way and never showed it - see the dt cap in doFrame.)
+     * a two-finger switch morphs the same way and never showed it.)
      */
     private CoverMorphLayer(Context context) {
         super(context);
@@ -113,6 +113,22 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
 
     static boolean active() { return sView != null && sView.running; }
 
+    /** How quickly an end catches up with where its live box has moved to, in seconds. */
+    private static final double ENDPOINT_TAU = 0.06;
+
+    private static CoverMorphMotion.Box chase(CoverMorphMotion.Box from,
+                                              CoverMorphMotion.Box to, float k) {
+        if (from == null) return to;
+        return new CoverMorphMotion.Box(from.x + (to.x - from.x) * k,
+                from.y + (to.y - from.y) * k, from.w + (to.w - from.w) * k,
+                from.h + (to.h - from.h) * k);
+    }
+
+    private static boolean near(CoverMorphMotion.Box a, CoverMorphMotion.Box b) {
+        return Math.abs(a.x - b.x) < 0.5f && Math.abs(a.y - b.y) < 0.5f
+                && Math.abs(a.w - b.w) < 0.5f && Math.abs(a.h - b.h) < 0.5f;
+    }
+
     /** Leaves nothing held and the kept view idle; for a keyguard that is going away. */
     private void release() {
         art = null;
@@ -160,9 +176,15 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         lastFrame = nowNs;
         motion.step(dt, Main.sClockResponse);
         CoverMorphMotion.Box liveThumb = Main.coverMorphThumbnail();
-        if (liveThumb != null) thumb = liveThumb;
+        // Both ends chase their live boxes rather than taking them: the target is placed between
+        // a clock that is collapsing and a media card being re-laid out, and one of them stepped
+        // mid-flight - filmed as the copy sliding sideways at a constant size for a frame.
+        float follow = (float) (1.0 - Math.exp(-dt / ENDPOINT_TAU));
+        if (liveThumb != null) thumb = chase(thumb, liveThumb, follow);
         CoverMorphMotion.Box liveCover = Main.coverMorphTarget(art);
-        if (liveCover != null) cover = liveCover;
+        if (liveCover != null) cover = chase(cover, liveCover, follow);
+        boolean endsSettled = (liveThumb == null || near(thumb, liveThumb))
+                && (liveCover == null || near(cover, liveCover));
         boolean artworkReady = !awaitArtworkPush || Main.coverMorphHandoffReady(cardMode)
                 || SystemClock.uptimeMillis() - startedAt > 2200L;
         boolean cardReady = !cardMode || motion.target != 1f
@@ -185,7 +207,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         // Back at the thumbnail, the layer stays until the thumbnail has fully faded in.
         boolean handoffDone = motion.target == 0f ? thumbAlpha() >= 1f
                 : artworkReady && cardReady && (cardMode || fullAlpha < 0.01f);
-        if (motion.atRest() && handoffDone && (!clockFlying
+        if (motion.atRest() && handoffDone && endsSettled && (!clockFlying
                 || SystemClock.uptimeMillis() - startedAt > 2200L)) {
             finish();
         } else {
