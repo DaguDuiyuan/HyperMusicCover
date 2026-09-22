@@ -459,7 +459,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (Math.abs(opacity - target) < 0.002f) opacity = target;
         float scaleTarget = playing ? CardSpring.PLAYING : CardSpring.PAUSED;
         if (phase == ClockCollapse.Phase.AOD) scale.snap(scaleTarget);
-        else scale.step(scaleTarget, dt);
+        // At the response the app's 缩放动画阻尼 sets, so the card keeps time with the clock,
+        // the wallpaper and the morph instead of running on a clock of its own.
+        else scale.step(scaleTarget, dt, Main.sClockResponse);
         if (previous != null && (phase == ClockCollapse.Phase.AOD
                 || SystemClock.uptimeMillis() - changedAt > TRACK_FADE_MS)) {
             previous.recycle();
