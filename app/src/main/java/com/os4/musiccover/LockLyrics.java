@@ -760,7 +760,7 @@ final class LockLyrics {
         long cur = sBlurSent;
         if (!again && cur != 0L && ((cur & 1L) != 0L) == want) return;
         long state = setBlurSent(want);
-        Main.sendToWallpaper("lyricblur", want, state >>> 1);
+        CoverPush.sendToWallpaper("lyricblur", want, state >>> 1);
         Xp.log(TAG + "cover blur " + (want ? "on" : "off") + (again ? " (told again)" : ""));
     }
 
