@@ -59,7 +59,6 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private float lastClock = Float.NaN, lastMedia = Float.NaN;
 
     private final Wash wash;
-    private boolean lastTargetUp;
 
     private CoverCardLayer(Context context) {
         super(context);
@@ -323,10 +322,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (getVisibility() == VISIBLE) {
             Xp.log("[MCCard] hidden outside keyguard on " + from);
         }
-        if (getVisibility() != GONE || ticking || opacity != 0f) {
-            Main.cardNote("card hidden on " + from + " " + Main.cardVisibleWhy());
-            hideImmediately();
-        }
+        if (getVisibility() != GONE || ticking || opacity != 0f) hideImmediately();
     }
 
     private void hideImmediately() {
@@ -553,12 +549,6 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                 && current.aodBackdrop != null;
         wash.show(backdrop);
         int visibility = opacity > 0f || target > 0f ? VISIBLE : GONE;
-        if ((target > 0f) != lastTargetUp) {
-            lastTargetUp = target > 0f;
-            Main.cardNote("card target " + (lastTargetUp ? "up" : "down") + " visible=" + visible
-                    + " art=" + (current != null) + " lyrics=" + lyrics + " place="
-                    + !Float.isNaN(drawX) + " " + Main.cardVisibleWhy());
-        }
         if (getVisibility() != visibility) setVisibility(visibility);
         if (visibility == VISIBLE) invalidate();
         boolean settling = Math.abs(target - opacity) > 0.001f
