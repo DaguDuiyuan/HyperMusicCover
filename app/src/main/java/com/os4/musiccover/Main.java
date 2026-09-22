@@ -1914,6 +1914,29 @@ public class Main extends XposedModule {
                         // Also as the broadcast's result, which `am broadcast` prints: on a
                         // phone whose LSPosed log drops INFO lines this is the only way to read it.
                         setResultData(st);
+                    } else if ("local".equals(op)) {
+                        // On a worker: this one reads the media database and then the file, and
+                        // a broadcast receiver runs on the main thread.
+                        final MediaController lw = sWatched;
+                        final java.io.File lf =
+                                new java.io.File(c.getFilesDir(), "mc_local.txt");
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                String d = LocalLyrics.describe(sAppCtx, lw);
+                                Xp.log(TAG + "local: " + d);
+                                try {
+                                    java.io.FileOutputStream os =
+                                            new java.io.FileOutputStream(lf);
+                                    os.write(d.getBytes("UTF-8"));
+                                    os.close();
+                                    lf.setReadable(true, false);
+                                } catch (Throwable t) {
+                                    Xp.log(TAG + "local write failed: " + t);
+                                }
+                            }
+                        }, "MCLocalProbe").start();
+                        setResultData("looking -> " + lf.getAbsolutePath());
                     } else if ("metadump".equals(op)) {
                         String d = LyricSource.dumpMetadata(sWatched);
                         Xp.log(TAG + "metadump: " + d);
@@ -7267,8 +7290,22 @@ public class Main extends XposedModule {
         // the foreground. Every one of those read as a track change: a fresh push, and the one
         // that answered it was the media card's small thumbnail, so the cover came up soft on the
         // second lock and every lock after it. Same track means same package and same title - the
-        // two fields all three shapes agree on - and then there is nothing to do here at all.
-        if (sCoverMode && (key.equals(sTrackKey) || sameTrack(key, sTrackKey))) return;
+        // two fields all three shapes agree on - and then there is nothing for the cover to do.
+        if (sCoverMode && (key.equals(sTrackKey) || sameTrack(key, sTrackKey))) {
+            // The lyric is not so sure. A provider module cannot write its lyric until the
+            // player has told it what is playing, so the payload lands on a session this has
+            // already settled as the same track - and this return was the only thing between it
+            // and the re-read that would pick it up. LockLyrics.onTrack was reachable from here
+            // and nowhere else, so with the cover on, a module that was a second late lost the
+            // song to whatever the network had found in the meantime, for the whole song.
+            //
+            // Its same-track path costs a getPlaybackState and a metadata read, and does nothing
+            // at all unless the session is carrying a payload that song has not been read
+            // against - each payload once, three per track. Cheap enough to reach from a path
+            // that a title-in-the-metadata player runs on every sung line.
+            LockLyrics.onTrack(key, sWatched);
+            return;
+        }
         sTrackKey = key;
         long ctNow = android.os.SystemClock.uptimeMillis();
         // Still waiting on the artwork for the previous one means this press lands on top of it:

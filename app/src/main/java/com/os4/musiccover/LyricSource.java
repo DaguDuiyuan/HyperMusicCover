@@ -42,6 +42,8 @@ final class LyricSource {
     static final int SRC_NONE = 0;
     /** The player published the whole lyric itself, or a provider module wrote it to the session. */
     static final int SRC_LYRIC_INFO = 1;
+    /** The file being played carried its own lyric - a .lrc beside it, or its own tag. */
+    static final int SRC_LOCAL = 6;
     /** The AMLL database, keyed by the platform's song id. */
     static final int SRC_DATABASE = 2;
     /** Found by name on NetEase - the fallback for a session carrying neither of the above. */
@@ -134,6 +136,16 @@ final class LyricSource {
      * positive contradiction rejects it: a payload with no songName is common and says nothing
      * either way, and a title carries decorations the payload need not repeat - "白色风车" and
      * "白色风车 (Live)" are the same song - so one containing the other is agreement.
+     *
+     * The title is not the only field that can answer, and on some players it is the wrong one.
+     * Salt Player writes the line being sung into TITLE - measured 2026-09-22, TITLE went
+     * "笑声更迷人" -> "Oh oh oh Oh oh" -> "抹去雨水双眼无故地仰望" through one play of 喜欢你 -
+     * and puts "歌手 - 歌名" in ARTIST instead. Held against the title alone, a perfectly current
+     * payload reads as a stale one from the first sung line onwards: the only moment it passes is
+     * the track change itself, before the player has overwritten TITLE. That is why the lyric was
+     * there when the provider module was quick and gone for the whole song when it was not.
+     * So ARTIST's tail and the album are asked too, and agreement with any of the three is
+     * agreement - a rejection now needs every field the session published to disagree.
      */
     static String infoFor(MediaController c) {
         String info = lyricInfoOf(c);
@@ -150,9 +162,46 @@ final class LyricSource {
         if (a.isEmpty() || b.isEmpty() || a.contains(b) || b.contains(a)) {
             return info;
         }
+        if (agrees(a, artistTailOf(c)) || agrees(a, metaOf(c, MediaMetadata.METADATA_KEY_ALBUM))) {
+            return info;
+        }
         Xp.log("[MCLyric] the session's lyricInfo is still \"" + theirs
                 + "\" while the track is \"" + ours + "\"; not reading it");
         return null;
+    }
+
+    /**
+     * Whether one of the session's other fields carries the name the payload claims.
+     *
+     * `name` is already trimmed and lowered; the field is not. Same containment test as the
+     * title's, and for the same reason: either side may carry decorations the other does not.
+     */
+    private static boolean agrees(String name, String other) {
+        if (other == null) {
+            return false;
+        }
+        String s = other.trim().toLowerCase();
+        return !s.isEmpty() && (name.contains(s) || s.contains(name));
+    }
+
+    /**
+     * The song's name out of ARTIST, for the players that put it there.
+     *
+     * Split on the first " - ", the same way NcmLyrics.build() does and for the same reason: a
+     * dash inside the song's own name comes after the one that separates it from the artist.
+     * Null when ARTIST is an ordinary artist name, which is every other player.
+     */
+    private static String artistTailOf(MediaController c) {
+        String artist = metaOf(c, MediaMetadata.METADATA_KEY_ARTIST);
+        if (artist == null) {
+            return null;
+        }
+        int dash = artist.indexOf(" - ");
+        if (dash <= 0) {
+            return null;
+        }
+        String tail = artist.substring(dash + 3).trim();
+        return tail.isEmpty() ? null : tail;
     }
 
     /** Which song the payload says it is for, or null when it does not say. */
@@ -166,9 +215,14 @@ final class LyricSource {
 
     /** What the session says is playing, for the payload to be held against. */
     private static String titleOf(MediaController c) {
+        return metaOf(c, MediaMetadata.METADATA_KEY_TITLE);
+    }
+
+    /** One metadata string, or null - including when the session has no metadata at all. */
+    private static String metaOf(MediaController c, String key) {
         try {
             MediaMetadata md = c.getMetadata();
-            return md == null ? null : md.getString(MediaMetadata.METADATA_KEY_TITLE);
+            return md == null ? null : md.getString(key);
         } catch (Throwable t) {
             return null;
         }
@@ -195,7 +249,7 @@ final class LyricSource {
     private static final String KEY_LYRIC_INFO = "lyricInfo";
 
     /** LRC-style timing, bracketed with [] or <>. <> is the word-level (enhanced) form. */
-    private static final java.util.regex.Pattern TIMED =
+    static final java.util.regex.Pattern TIMED =
             java.util.regex.Pattern.compile("[\\[<][0-9]{1,3}:[0-9]{2}(?:[.:][0-9]{1,3})?[\\]>]");
 
     /**
@@ -649,7 +703,10 @@ final class LyricSource {
         // still a track change, and leaving the previous song's lookup live would let its
         // requests go on holding pool threads for a song nobody is listening to.
         final int gen = ++sLoadGen;
-        if (info == null && id == null && q == null) {
+        // Held now, on the caller's thread, because the worker below has no way to reach one.
+        final android.content.Context ctx = Main.sAppCtx;
+        final MediaController controller = c;
+        if (info == null && id == null && q == null && ctx == null) {
             Xp.log("[MCLyric] " + pkg + " publishes neither lyricInfo, a song id, nor a name");
             onMain(cb, java.util.Collections.<LyricLine>emptyList(),
                     "nothing to read from " + pkg, SRC_NONE);
@@ -659,7 +716,7 @@ final class LyricSource {
             @Override
             public void run() {
                 Rows r = new Rows();
-                // Four sources, best first, each one asked only because the one before it came
+                // Five sources, best first, each one asked only because the one before it came
                 // up empty. Every step falls through rather than stopping, which is the whole
                 // shape of this: a source that is present but useless - a provider module that
                 // wrote a lyricInfo it could not fill, an id the database does not have - used
@@ -667,6 +724,19 @@ final class LyricSource {
                 // perfectly good answer sat one step further down.
                 if (info != null) {
                     session(info, r);
+                }
+                // The file's own lyric, which outranks what the session is carrying - with one
+                // exception, and the exception is the reason the session is read first at all.
+                //
+                // For music on this phone the file is the authority: its lyric is the one the
+                // person keeps with it, and reading it cannot land on the wrong song. What the
+                // session has is usually that same lyric relayed by a provider module, so
+                // preferring the file costs nothing and stops depending on the module. But a
+                // module that has word timings publishes them in rawLyric, and no .lrc or tag
+                // has ever carried any - so when the session's answer is word-timed it is the
+                // better of two readings of the same words, and it keeps the screen.
+                if (!words(r.lines)) {
+                    local(ctx, controller, r);
                 }
                 if (r.lines.isEmpty() && (id != null || q != null)) {
                     race(gen, id, dir, q, r);
@@ -860,6 +930,45 @@ final class LyricSource {
             Xp.log("[MCLyric] lyricInfo parse failed: " + t);
             r.lines = java.util.Collections.emptyList();
             r.why = "lyricInfo parse error";
+        }
+    }
+
+    /** Whether a set of rows carries word timings, which is what the session route can add. */
+    private static boolean words(List<LyricLine> lines) {
+        for (LyricLine l : lines) {
+            if (l.hasWords()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The lyric shipped with the file being played, when the session is playing a file.
+     *
+     * Replaces whatever the session gave us rather than falling through to it, because when both
+     * have something they have the same words and only one of them was read off the disk this
+     * song is playing from. A miss - a streaming player, a file with no lyric, a name that could
+     * not be matched - leaves r exactly as it was, so the session's answer stands and the
+     * catalogues below are still reached by a song that has neither.
+     */
+    private static void local(android.content.Context ctx, MediaController c, Rows r) {
+        String before = r.why;
+        try {
+            LocalLyrics.Found f = LocalLyrics.load(ctx, c);
+            if (f == null) {
+                return;
+            }
+            List<LyricLine> lines = LyricParse.parse(f.body);
+            if (lines.isEmpty()) {
+                r.why = join(before, "the local lyric parsed to nothing " + shape(f.body));
+                return;
+            }
+            r.lines = lines;
+            r.source = SRC_LOCAL;
+            r.why = lines.size() + " lines from " + f.how;
+        } catch (Throwable t) {
+            Xp.log("[MCLyric] local lyric failed: " + t);
         }
     }
 

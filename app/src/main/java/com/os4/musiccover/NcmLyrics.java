@@ -146,9 +146,9 @@ final class NcmLyrics {
         title = title == null ? "" : title.trim();
         artist = artist == null ? "" : artist.trim();
         album = album == null ? "" : album.trim();
-        // Salt Player publishes "Artist - Song" in ARTIST and leaves TITLE empty, so the song
-        // name is in there and nowhere else. The first " - " splits it: a dash inside the song
-        // name ("i'm so tired... (Stripped - Live in LA)") comes after the one that matters, and
+        // Salt Player publishes "Artist - Song" in ARTIST, so the song name is in there as well
+        // as - or instead of - TITLE. The first " - " splits it: a dash inside the song name
+        // ("i'm so tired... (Stripped - Live in LA)") comes after the one that matters, and
         // taking the first keeps the whole remainder as the title.
         int dash = artist.indexOf(" - ");
         if (dash > 0) {
@@ -158,10 +158,20 @@ final class NcmLyrics {
                 if (title.isEmpty()) {
                     title = tail;
                     artist = head;
-                } else if (tail.equals(title) || tail.equals(album)) {
+                } else if (tail.equals(title)) {
                     // The tail is only repeating what we already know; drop it so the search
                     // gets a clean artist. An artist whose own name contains a dash and whose
                     // title is published properly keeps it.
+                    artist = head;
+                } else if (tail.equals(album)) {
+                    // ARTIST and ALBUM agree on a name that TITLE does not carry - which is Salt
+                    // Player with its status-bar lyric switched on, where TITLE is the line being
+                    // sung. Searched as published it asks NetEase for a song called
+                    // "抹去雨水双眼无故地仰望": measured 2026-09-22 the right track came back
+                    // anyway, on the artist, with its duration matching to the millisecond, and
+                    // pick() threw it away because the name scored zero. Two fields against one,
+                    // and the two that agree are the two that hold still through a song.
+                    title = tail;
                     artist = head;
                 }
             }

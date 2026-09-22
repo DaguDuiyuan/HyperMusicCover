@@ -481,7 +481,12 @@ final class LockLyrics {
                 // SRC_NONE is deliberately not an answer either way: finding nothing can mean
                 // the network was down or the song simply has no lyrics anywhere, neither of
                 // which says anything about the provider.
-                if (source != LyricSource.SRC_NONE) {
+                //
+                // Nor is SRC_LOCAL, for the opposite reason. The file's own lyric outranks the
+                // session's, so a song that has one never reports what the session was carrying
+                // - the module may have been working perfectly and simply not been needed.
+                // Neither answer is available, so the last real one stands.
+                if (source != LyricSource.SRC_NONE && source != LyricSource.SRC_LOCAL) {
                     boolean fromSession = source == LyricSource.SRC_LYRIC_INFO;
                     if (fromSession != sSawSessionLyric) {
                         sSawSessionLyric = fromSession;
@@ -685,6 +690,8 @@ final class LockLyrics {
         switch (source) {
             case LyricSource.SRC_LYRIC_INFO:
                 return "session";
+            case LyricSource.SRC_LOCAL:
+                return "local";
             case LyricSource.SRC_DATABASE:
                 return "amll";
             case LyricSource.SRC_NETEASE:
