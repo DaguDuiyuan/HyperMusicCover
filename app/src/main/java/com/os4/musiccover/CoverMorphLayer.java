@@ -91,14 +91,14 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
 
     /** How long the OEM thumbnail takes to fade back in under the copy that has landed on it. */
     private static final long THUMB_FADE_MS = 120L;
-    /** When the copy first covered the thumbnail on the way back; 0 until it has. */
+    /** When the copy came to rest on the thumbnail on the way back; 0 until it has. */
     private long revealAt;
 
     /**
      * The OEM thumbnail's alpha while a morph owns its pixels. Zero on the way out. On the way
      * back it fades in, so its own shadow comes in with it rather than all at once when this
-     * layer goes - but only from the moment the copy covers it: started on progress alone it
-     * showed beside a copy that was still larger and elsewhere.
+     * layer goes - but only once the copy has settled on it. Earlier, it showed beside a copy
+     * still larger and elsewhere, or as a ring round one dipping below its size in the bounce.
      */
     static float thumbAlpha() {
         CoverMorphLayer v = sView;
@@ -142,10 +142,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         fullAlpha += (desiredAlpha - fullAlpha) * Math.min(1f, dt * 20f);
         invalidate();
         if (motion.target == 0f) {
-            if (revealAt == 0L && (motion.atRest() || covers(CoverMorphMotion.frame(thumb, cover,
-                    shownProgress(), getResources().getDisplayMetrics().density), thumb))) {
-                revealAt = SystemClock.uptimeMillis();
-            }
+            if (revealAt == 0L && motion.atRest()) revealAt = SystemClock.uptimeMillis();
             // The fade-in is written by the card's own pass; it needs a frame to run in.
             if (revealAt != 0L) Main.refreshMediaCardForMorph();
         }
@@ -164,26 +161,10 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         }
     }
 
-    /**
-     * The progress the copy is drawn at. Going out, the spring's overshoot is the landing bounce.
-     * Coming back it is not kept: past zero the copy shrank below the thumbnail, which by then is
-     * fading in underneath, and the thumbnail's edge showed round it as a ring.
-     */
-    private float shownProgress() {
-        return motion.target == 0f ? Math.max(0f, motion.value) : motion.value;
-    }
-
-    /** Whether the copy's box hides the thumbnail's, give or take a pixel. */
-    private static boolean covers(CoverMorphMotion.Box copy, CoverMorphMotion.Box thumb) {
-        return copy.x <= thumb.x + 1f && copy.y <= thumb.y + 1f
-                && copy.x + copy.w >= thumb.x + thumb.w - 1f
-                && copy.y + copy.h >= thumb.y + thumb.h - 1f;
-    }
-
     @Override protected void onDraw(Canvas canvas) {
         if (!running || art.isRecycled()) return;
         float density = getResources().getDisplayMetrics().density;
-        CoverMorphMotion.Box box = CoverMorphMotion.frame(thumb, cover, shownProgress(), density);
+        CoverMorphMotion.Box box = CoverMorphMotion.frame(thumb, cover, motion.value, density);
         int[] root = new int[2];
         getLocationOnScreen(root);
         drawn.set(box.x - root[0], box.y - root[1],
