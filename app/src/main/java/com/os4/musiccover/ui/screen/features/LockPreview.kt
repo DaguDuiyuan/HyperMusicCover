@@ -220,7 +220,9 @@ private fun DrawScope.drawSquareCover(
         min(screenW - 2f * gap, bottom - top))
     if (side < 96f * density) return
     val center = (top + bottom) / 2f + offsetDp.coerceIn(-120f, 120f) * density
-    val y = (center - side / 2f).coerceIn(top, bottom - side)
+    // Not coerceIn: with the side limited by the room, bottom - side can land a rounding error
+    // below top, and an empty range throws. Same order as CoverCardStyle.place().
+    val y = max(top, min(bottom - side, center - side / 2f))
     val rect = Rect((screenW - side) * k / 2f, y * k,
         (screenW + side) * k / 2f, (y + side) * k)
     val radius = min(20f * density, side * 0.10f) * k
