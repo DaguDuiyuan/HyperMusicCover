@@ -332,16 +332,6 @@ private fun CoverGroup(
                 },
             )
         } else {
-            SwitchPreference(
-                title = stringResource(R.string.cover_card_aod),
-                summary = stringResource(R.string.cover_card_aod_summary),
-                checked = module.coverCardAod,
-                enabled = enabled,
-                onCheckedChange = {
-                    onChange(module.copy(coverCardAod = it))
-                    ModuleBridge.setCoverCardAod(context, it)
-                },
-            )
             ValueSlider(
                 title = stringResource(R.string.cover_card_size),
                 summary = stringResource(R.string.cover_card_size_summary),

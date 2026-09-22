@@ -527,8 +527,10 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                 && (phase == ClockCollapse.Phase.EXIT ? exitWithCard : !lyrics)
                 ? (inAod ? 1f : Main.cardProgress()) : 0f;
         float response = Math.max(0.18f, Main.sClockResponse);
+        // Tied to the clock's own flight on the lit screen. Falling asleep it eases instead: into
+        // a doze with the OEM's big clock the square has to go, and snapped it vanished in a frame.
         if ((inAod && lyrics) || phase == ClockCollapse.Phase.ENTER
-                || phase == ClockCollapse.Phase.EXIT) {
+                || (phase == ClockCollapse.Phase.EXIT && Main.screenOn())) {
             opacity = target;
         } else {
             opacity += (target - opacity) * Math.min(1f, dt * 3f / response);

@@ -23,7 +23,6 @@ object SettingsBackup {
     private const val KEY_COVER_CARD_SIZE = "coverCardSizeDp"
     private const val KEY_COVER_CARD_MARGIN = "coverCardMarginDp"
     private const val KEY_COVER_CARD_OFFSET = "coverCardOffsetDp"
-    private const val KEY_COVER_CARD_AOD = "coverCardAod"
     private const val KEY_CLOCK_HEIGHT = "clockHeight"
     /** Written by versions that stored the collapse as a scale coefficient; read, never written. */
     private const val KEY_CLOCK_SCALE = "clockScale"
@@ -62,7 +61,6 @@ object SettingsBackup {
             json.put(KEY_COVER_CARD_SIZE, module.coverCardSizeDp.toDouble())
             json.put(KEY_COVER_CARD_MARGIN, module.coverCardMarginDp.toDouble())
             json.put(KEY_COVER_CARD_OFFSET, module.coverCardOffsetDp.toDouble())
-            json.put(KEY_COVER_CARD_AOD, module.coverCardAod)
             json.put(KEY_CLOCK_HEIGHT, module.clockHeightDp.toDouble())
             if (module.clockSize > 0f) json.put(KEY_CLOCK_SIZE, module.clockSize.toDouble())
             json.put(KEY_CLOCK_OFFSET, module.clockOffsetDp.toDouble())
@@ -110,8 +108,6 @@ object SettingsBackup {
             }
             ModuleBridge.setCoverStyle(context, "mode",
                 if (obj.has(KEY_COVER_STYLE)) obj.getInt(KEY_COVER_STYLE).toFloat() else 0f)
-            ModuleBridge.setCoverCardAod(context,
-                if (obj.has(KEY_COVER_CARD_AOD)) obj.getBoolean(KEY_COVER_CARD_AOD) else false)
             // The old key held a coefficient. A value under the new range is recognised as one
             // of those by the module and converted there against the glyphs actually on screen,
             // which is the only thing that knows what a coefficient of 0.335 was worth.

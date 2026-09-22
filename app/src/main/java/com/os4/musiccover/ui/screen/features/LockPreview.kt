@@ -587,12 +587,11 @@ private fun sampleShot(
 }
 
 /**
- * Wide enough to read the layout at arm's length, narrow enough to leave the controls under it
- * about four rows of screen. KernelSU's colour-palette preview uses 0.42 of the width, but its
- * preview scrolls away and ours must not.
+ * Half of what it was (0.38): the preview is pinned and does not scroll away, and at 0.38 it
+ * took the rows the controls under it needed. The corner halves with it, so it keeps its shape.
  */
-private const val PREVIEW_WIDTH_FRACTION = 0.38f
-private val PREVIEW_CORNER = 20.dp
+private const val PREVIEW_WIDTH_FRACTION = 0.19f
+private val PREVIEW_CORNER = 10.dp
 
 /**
  * The wallpaper is composed at this width and stretched to fit. Roughly a preview's worth of

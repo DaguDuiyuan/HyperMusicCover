@@ -17,8 +17,6 @@
     <string name="cover_bias_summary">0 is flush with the top, 0.5 is centred</string>
     <string name="cover_style">Cover presentation</string>
     <string name="cover_style_summary">Full-screen art or a square card on a static blurred background</string>
-    <string name="cover_card_aod">Show cover card on AOD</string>
-    <string name="cover_card_aod_summary">Hidden by default; keep the square artwork on the always-on display</string>
     <string name="cover_style_full">Full-screen cover</string>
     <string name="cover_style_card">Square card</string>
     <string name="cover_card_size">Card size</string>
@@ -79,7 +77,6 @@
     <string name="about_source_code">Source Code</string>
     <string name="about_dependencies">Third Party Licenses</string>
     <string name="license_agpl">GNU AGPL v3.0</string>
-    <string name="license_agpl_summary">View full license text · modified versions must stay open source</string>
     <string name="third_party_licenses_title">Third Party Licenses</string>
     <string name="about_credits">Credits</string>
     <string name="about_credits_summary">The projects this one learnt from</string>

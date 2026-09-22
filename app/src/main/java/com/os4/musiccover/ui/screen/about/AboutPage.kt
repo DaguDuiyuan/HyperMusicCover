@@ -393,7 +393,6 @@ private fun AboutContent(
                     ) {
                         ArrowPreference(
                             title = stringResource(R.string.license_agpl),
-                            summary = stringResource(R.string.license_agpl_summary),
                             onClick = { uriHandler.openUri("https://www.gnu.org/licenses/agpl-3.0.txt") },
                         )
                         ArrowPreference(

@@ -37,7 +37,6 @@ object ModuleBridge {
         val coverCardSizeDp: Float = 240f,
         val coverCardMarginDp: Float = 16f,
         val coverCardOffsetDp: Float = 0f,
-        val coverCardAod: Boolean = false,
         /**
          * How tall the collapsed clock's digits are, in dp.
          *
@@ -203,8 +202,6 @@ object ModuleBridge {
             putExtra("v", value)
         }
 
-    fun setCoverCardAod(context: Context, on: Boolean) =
-        send(context, "covercardaod") { putExtra("on", on) }
 
     fun setClockHeight(context: Context, dp: Float) =
         send(context, "clockscale") { putExtra("v", dp) }
@@ -481,7 +478,6 @@ object ModuleBridge {
             coverCardSizeDp = b.getFloat("covercardsize", 240f),
             coverCardMarginDp = b.getFloat("covercardmargin", 16f),
             coverCardOffsetDp = b.getFloat("covercardoffset", 0f),
-            coverCardAod = b.getBoolean("covercardaod", false),
             clockHeightDp = b.getFloat("clock", 36f),
             clockSize = sizeOf(b),
             clockOffsetDp = b.getFloat("clockoff", 0f),

@@ -389,7 +389,6 @@ public class Main extends XposedModule {
     private static final float DEFAULT_BIAS = 0.34f;
     static volatile float sBias = DEFAULT_BIAS;
     static volatile CoverCardStyle sCoverCardStyle = CoverCardStyle.defaults();
-    private static volatile boolean sCoverCardAod;
     private static volatile boolean sCoverCardPlaying;
 
     /**
@@ -1558,7 +1557,6 @@ public class Main extends XposedModule {
                     + "\ncovercardsize=" + sCoverCardStyle.sizeDp
                     + "\ncovercardmargin=" + sCoverCardStyle.marginDp
                     + "\ncovercardoffset=" + sCoverCardStyle.offsetDp
-                    + "\ncovercardaod=" + (sCoverCardAod ? 1 : 0)
                     // A pending pre-dp value is written as itself: it cannot be converted until
                     // a confirmed box exists, and writing the default over it would lose the
                     // setting the user actually had.
@@ -1665,7 +1663,6 @@ public class Main extends XposedModule {
                                 sCoverCardStyle.with("margin", Float.parseFloat(v));
                         else if ("covercardoffset".equals(k)) sCoverCardStyle =
                                 sCoverCardStyle.with("offset", Float.parseFloat(v));
-                        else if ("covercardaod".equals(k)) sCoverCardAod = "1".equals(v);
                         else if ("clock".equals(k)) setClockHeightDp(Float.parseFloat(v));
                         else if ("clocksize".equals(k)) setClockSize(Float.parseFloat(v));
                         else if ("clockoff".equals(k)) setClockOffsetDp(Float.parseFloat(v));
@@ -1846,10 +1843,6 @@ public class Main extends XposedModule {
                             }
                             CoverPush.pushArtAsync(true, false);
                         }
-                    } else if ("covercardaod".equals(op)) {
-                        sCoverCardAod = i.getBooleanExtra("on", false);
-                        CoverCardLayer.refresh();
-                        saveState();
                     } else if ("mediabtn".equals(op)) {
                         setResultData(dumpClickables());
                     } else if ("queue".equals(op)) {
@@ -2273,7 +2266,6 @@ public class Main extends XposedModule {
                         out.putFloat("covercardsize", sCoverCardStyle.sizeDp);
                         out.putFloat("covercardmargin", sCoverCardStyle.marginDp);
                         out.putFloat("covercardoffset", sCoverCardStyle.offsetDp);
-                        out.putBoolean("covercardaod", sCoverCardAod);
                         out.putFloat("clock", sClockHeightDp);
                         out.putFloat("clocksize", effectiveClockSize());
                         out.putFloat("clockoff", sClockOffsetDp);
@@ -5587,9 +5579,15 @@ public class Main extends XposedModule {
                 && (sScreenOn || coverCardInAod()) && !bouncerShown();
     }
 
+    /**
+     * The square stays through a doze that keeps the cover's small clock, and only that one.
+     * Under the OEM's big AOD clock there is no room between it and the media card, and the
+     * square sat across the digits. It used to be a setting, off by default; with the big clock
+     * taken care of there was nothing left for the setting to protect.
+     */
     static boolean coverCardInAod() {
-        return sCoverCardAod && sCoverMode && !sScreenOn
-                && ClockCollapse.phase() == ClockCollapse.Phase.AOD;
+        return sCoverMode && !sScreenOn && ClockCollapse.phase() == ClockCollapse.Phase.AOD
+                && ClockCollapse.aodHeld();
     }
 
     /** The full-screen AOD may show a faint static colour wash even with the square hidden. */

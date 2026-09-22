@@ -17,8 +17,6 @@
     <string name="cover_bias_summary">0 贴顶，0.5 居中</string>
     <string name="cover_style">封面展现形式</string>
     <string name="cover_style_summary">全屏封面或静态模糊背景上的方形卡片</string>
-    <string name="cover_card_aod">在 AOD 显示封面卡片</string>
-    <string name="cover_card_aod_summary">默认隐藏；开启后在息屏显示中保留方形封面</string>
     <string name="cover_style_full">全屏封面</string>
     <string name="cover_style_card">方形卡片</string>
     <string name="cover_card_size">卡片大小</string>
@@ -79,7 +77,6 @@
     <string name="about_source_code">项目地址</string>
     <string name="about_dependencies">第三方许可证</string>
     <string name="license_agpl">GNU AGPL v3.0</string>
-    <string name="license_agpl_summary">查看完整协议文本 · 分发修改版必须同样开源</string>
     <string name="third_party_licenses_title">第三方许可证</string>
     <string name="about_credits">致谢</string>
     <string name="about_credits_summary">参考过的项目与模块</string>
