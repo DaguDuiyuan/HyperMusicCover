@@ -258,7 +258,21 @@ final class LyricSource {
         }
     }
 
-    private static final ExecutorService POOL = Executors.newFixedThreadPool(4,
+    /**
+     * Room for three lookups' mirrors at once, not one's.
+     *
+     * It was MIRRORS.length, which is the one size that cannot work: a single lookup fires every
+     * mirror at once and so fills the pool exactly, and the next song's four requests then wait
+     * behind four connections that are allowed 4s to connect and 6s to read. Skipping through a
+     * few tracks was enough to put the newest song's requests last in a queue whose head had no
+     * reason to hurry - the lyrics arriving "eventually", long after the song they belong to.
+     *
+     * Three deep rather than unbounded because the requests that would need a fourth are ones
+     * superseded() has already declined to send, and this runs inside SystemUI. Derived from
+     * MIRRORS.length so that adding a mirror widens the pool with it instead of quietly
+     * recreating the jam.
+     */
+    private static final ExecutorService POOL = Executors.newFixedThreadPool(MIRRORS.length * 3,
             new ThreadFactory() {
                 @Override
                 public Thread newThread(Runnable r) {
@@ -267,6 +281,26 @@ final class LyricSource {
                     return t;
                 }
             });
+
+    /**
+     * Which lookup is the live one. Only ever the newest.
+     *
+     * A track change makes every lookup before it unwanted - LockLyrics already drops an answer
+     * that lands after the song moved on, by its own count. This is the same fact told to the
+     * requests instead of to the answer, and it is what keeps the pool above from filling with
+     * work whose result is known to be worthless: a superseded request sent anyway costs a
+     * thread for the whole of its timeout, and the song that is actually playing waits for it.
+     *
+     * Bumped by every entry point, so the demo counts too. That is correct rather than merely
+     * harmless - a demo and a track lookup are both "the lyrics on screen now", and only one of
+     * them can be.
+     */
+    private static volatile int sLoadGen;
+
+    /** Whether a newer lookup has started, i.e. nothing this one finds will be shown. */
+    private static boolean superseded(int gen) {
+        return gen != sLoadGen;
+    }
 
     /**
      * The song id, if the session is publishing one.
@@ -318,6 +352,10 @@ final class LyricSource {
         // wrong platform's id space.
         final String id = dir == null ? null : idOf(c);
         final NcmLyrics.Query q = NcmLyrics.queryOf(c);
+        // Claimed before the early return below as well: a track with nothing to read from is
+        // still a track change, and leaving the previous song's lookup live would let its
+        // requests go on holding pool threads for a song nobody is listening to.
+        final int gen = ++sLoadGen;
         if (info == null && id == null && q == null) {
             Xp.log("[MCLyric] " + pkg + " publishes neither lyricInfo, a song id, nor a name");
             onMain(cb, java.util.Collections.<LyricLine>emptyList(),
@@ -338,7 +376,7 @@ final class LyricSource {
                     session(info, r);
                 }
                 if (r.lines.isEmpty() && (id != null || q != null)) {
-                    race(id, dir, q, r);
+                    race(gen, id, dir, q, r);
                 }
                 Xp.log("[MCLyric] " + pkg + " -> " + r.why);
                 onMain(cb, r.lines, r.why, r.source);
@@ -375,8 +413,8 @@ final class LyricSource {
      * started, and the fallback is the one that actually had the song. Run together, a miss on
      * one costs nothing on the other.
      */
-    private static void race(final String id, final String dir, final NcmLyrics.Query q,
-                             Rows out) {
+    private static void race(final int gen, final String id, final String dir,
+                             final NcmLyrics.Query q, Rows out) {
         final Rows db = new Rows();
         final Rows ncm = new Rows();
         // Tags rather than the rows themselves: a row says nothing about which route produced it
@@ -389,7 +427,7 @@ final class LyricSource {
                 @Override
                 public void run() {
                     try {
-                        database(id, dir, db);
+                        database(gen, id, dir, db);
                     } finally {
                         done.offer(1);
                     }
@@ -503,10 +541,17 @@ final class LyricSource {
     }
 
     /** The AMLL database, by platform id, in the one directory that id can belong to. */
-    private static void database(String id, String dir, Rows r) {
+    private static void database(int gen, String id, String dir, Rows r) {
         String before = r.why;
+        // A lookup can be overtaken before its thread even runs. Said plainly rather than left
+        // to come out as "could not reach the database", which is what the mirrors will report
+        // for a request one() has declined to send and is the wrong thing to read in a log.
+        if (superseded(gen)) {
+            r.why = join(before, "the track changed before the database was asked");
+            return;
+        }
         try {
-            Answer a = fetch(dir, id);
+            Answer a = fetch(gen, dir, id);
             if (a.status != FOUND) {
                 r.why = join(before, a.status == MISSING
                         ? "not in " + dir + " (" + id + ")"
@@ -586,11 +631,12 @@ final class LyricSource {
 
     private static void load(final String id, final String dir, final String who,
                              final Callback cb) {
+        final int gen = ++sLoadGen;
         new Thread(new Runnable() {
             @Override
             public void run() {
                 Rows r = new Rows();
-                database(id, dir, r);
+                database(gen, id, dir, r);
                 Xp.log("[MCLyric] " + who + " id=" + id + " -> " + r.why);
                 onMain(cb, r.lines, r.why, r.source);
             }
@@ -608,13 +654,13 @@ final class LyricSource {
     }
 
     /** What the mirrors said about one directory. Every mirror is asked at once. */
-    static Answer fetch(String dir, String id) {
+    static Answer fetch(final int gen, String dir, String id) {
         final BlockingQueue<Answer> answers = new LinkedBlockingQueue<>();
         for (final String[] m : MIRRORS) {
             POOL.execute(new Runnable() {
                 @Override
                 public void run() {
-                    answers.offer(one(m, dir, id));
+                    answers.offer(one(gen, m, dir, id));
                 }
             });
         }
@@ -651,7 +697,15 @@ final class LyricSource {
         return new Answer(sawMissing ? MISSING : UNREACHABLE, null);
     }
 
-    private static Answer one(String[] mirror, String dir, String id) {
+    private static Answer one(int gen, String[] mirror, String dir, String id) {
+        // Checked here rather than before the pool took the work, because here is where a queued
+        // request has been waiting: the track may well have changed between being submitted and
+        // reaching a thread, and going out anyway would hold that thread for the full timeout on
+        // behalf of a song that stopped playing. Nothing is logged - the request never happened,
+        // and a burst of skips would otherwise put four of these in the log per track.
+        if (superseded(gen)) {
+            return new Answer(UNREACHABLE, null);
+        }
         String url = String.format(mirror[1], dir, id);
         long started = android.os.SystemClock.uptimeMillis();
         HttpURLConnection conn = null;
