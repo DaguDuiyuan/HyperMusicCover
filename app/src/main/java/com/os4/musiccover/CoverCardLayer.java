@@ -59,6 +59,8 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private float lastClock = Float.NaN, lastMedia = Float.NaN;
 
     private final Wash wash;
+    /** Dozed under the OEM's big clock and not yet back to a settled lock screen; see doFrame. */
+    private boolean afterBigClock;
 
     private CoverCardLayer(Context context) {
         super(context);
@@ -523,13 +525,21 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         boolean visible = style.mode == CoverCardStyle.CARD && Main.coverCardVisible();
         // 0.2.2 can keep lyrics in the full-screen AOD. The selected lyric page owns this space.
         boolean lyrics = LockLyrics.wantsAttached();
-        float target = visible && current != null
+        // A doze under the OEM's big clock hides the square, and the wake out of it keeps it hidden
+        // until the clock has collapsed: shown at once it sat full size across the big digits, then
+        // was squeezed small and low while the clock shrank, and only then grew back.
+        if (phase == ClockCollapse.Phase.AOD && !Main.screenOn() && !ClockCollapse.aodHeld()) {
+            afterBigClock = true;
+        } else if (phase == ClockCollapse.Phase.ON || phase == ClockCollapse.Phase.OFF) {
+            afterBigClock = false;
+        }
+        float target = visible && current != null && !afterBigClock
                 && (phase == ClockCollapse.Phase.EXIT ? exitWithCard : !lyrics)
                 ? (inAod ? 1f : Main.cardProgress()) : 0f;
         float response = Math.max(0.18f, Main.sClockResponse);
         // Tied to the clock's own flight on the lit screen. Falling asleep it eases instead: into
         // a doze with the OEM's big clock the square has to go, and snapped it vanished in a frame.
-        if ((inAod && lyrics) || phase == ClockCollapse.Phase.ENTER
+        if ((inAod && lyrics) || (phase == ClockCollapse.Phase.ENTER && !afterBigClock)
                 || (phase == ClockCollapse.Phase.EXIT && Main.screenOn())) {
             opacity = target;
         } else {
@@ -555,7 +565,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (visibility == VISIBLE) invalidate();
         boolean settling = Math.abs(target - opacity) > 0.001f
                 || (phase != ClockCollapse.Phase.AOD && !scale.atRest(scaleTarget))
-                || previous != null || placing;
+                || previous != null || placing
+                // Still waking from the big clock: keep looking until the clock has landed.
+                || (afterBigClock && phase != ClockCollapse.Phase.AOD);
         if (settling) {
             Choreographer.getInstance().postFrameCallback(this);
         } else {
