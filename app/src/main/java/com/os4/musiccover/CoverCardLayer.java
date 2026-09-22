@@ -436,6 +436,62 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         super.onDetachedFromWindow();
     }
 
+    /** Where the square is drawn, eased towards placeNow(); NaN until it has a place. */
+    private float drawX = Float.NaN, drawY, drawSide;
+    /** The last place the lit lock screen gave it - what the doze keeps. */
+    private CoverCardStyle.Rect lockPlace;
+
+    /** The square's place from the live clock and media card, in this view's coordinates. */
+    private CoverCardStyle.Rect placeNow() {
+        int[] loc = new int[2];
+        getLocationOnScreen(loc);
+        return style.place(getWidth(), getHeight(), getResources().getDisplayMetrics().density,
+                ClockCollapse.contentBottomOnScreen() - loc[1],
+                Main.coverCardMediaTop() - loc[1]);
+    }
+
+    /**
+     * Moves the drawn place one frame towards where the square belongs.
+     *
+     * Through the doze it keeps the lock screen's place: asked live, the media card's AOD stand-in
+     * (70% of the screen) re-centred it, and it jumped 63px on the way in and back 11px on the
+     * wake, while everything around it slid with the doze zoom. It sits inside that zoom, so
+     * holding still in its own coordinates is exactly sliding with it. Any other change of
+     * place - the wake landing, a rebuilt media card - is eased at the 缩放动画阻尼 response
+     * instead of cut. A square that is not showing yet just takes its place.
+     *
+     * @return whether it is still on its way
+     */
+    private boolean followPlace(ClockCollapse.Phase phase, float dt, float response,
+                                float target) {
+        CoverCardStyle.Rect goal;
+        if (phase == ClockCollapse.Phase.AOD) {
+            goal = lockPlace != null ? lockPlace : placeNow();
+        } else {
+            goal = placeNow();
+            if (goal != null) lockPlace = goal;
+        }
+        if (goal == null) return false;
+        if (Float.isNaN(drawX) || opacity <= 0f) {
+            drawX = goal.x;
+            drawY = goal.y;
+            drawSide = goal.side;
+            return false;
+        }
+        float k = Math.min(1f, dt * 3f / response);
+        drawX += (goal.x - drawX) * k;
+        drawY += (goal.y - drawY) * k;
+        drawSide += (goal.side - drawSide) * k;
+        boolean moving = Math.abs(goal.x - drawX) > 0.5f || Math.abs(goal.y - drawY) > 0.5f
+                || Math.abs(goal.side - drawSide) > 0.5f;
+        if (!moving) {
+            drawX = goal.x;
+            drawY = goal.y;
+            drawSide = goal.side;
+        }
+        return moving;
+    }
+
     @Override public void doFrame(long nowNs) {
         if (!ticking || !isAttachedToWindow()) { stop(); return; }
         float dt = lastFrame == 0L ? 1f / 60f
@@ -462,6 +518,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         // At the response the app's 缩放动画阻尼 sets, so the card keeps time with the clock,
         // the wallpaper and the morph instead of running on a clock of its own.
         else scale.step(scaleTarget, dt, Main.sClockResponse);
+        boolean placing = followPlace(phase, dt, response, target);
         if (previous != null && (phase == ClockCollapse.Phase.AOD
                 || SystemClock.uptimeMillis() - changedAt > TRACK_FADE_MS)) {
             previous.recycle();
@@ -475,7 +532,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (visibility == VISIBLE) invalidate();
         boolean settling = Math.abs(target - opacity) > 0.001f
                 || (phase != ClockCollapse.Phase.AOD && !scale.atRest(scaleTarget))
-                || previous != null;
+                || previous != null || placing;
         if (settling) {
             Choreographer.getInstance().postFrameCallback(this);
         } else {
@@ -496,14 +553,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (opacity <= 0f || CoverMorphLayer.cardSuppressed()
                 || (Main.coverCardInAod() && LockLyrics.wantsAttached())) return;
         float density = getResources().getDisplayMetrics().density;
-        int[] loc = new int[2];
-        getLocationOnScreen(loc);
-        CoverCardStyle.Rect r = style.place(getWidth(), getHeight(), density,
-                ClockCollapse.contentBottomOnScreen() - loc[1],
-                Main.coverCardMediaTop() - loc[1]);
-        if (r == null) return;
-        CoverMorphMotion.Box actual = CoverMorphMotion.cardSquare(r.x, r.y,
-                r.side, scale.value);
+        if (Float.isNaN(drawX)) return;
+        CoverMorphMotion.Box actual = CoverMorphMotion.cardSquare(drawX, drawY,
+                drawSide, scale.value);
         float scaled = actual.w;
         square.set(actual.x, actual.y, actual.x + actual.w, actual.y + actual.h);
         float radius = Math.min(20f * density, scaled * 0.10f);
