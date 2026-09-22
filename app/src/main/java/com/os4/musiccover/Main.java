@@ -1934,9 +1934,16 @@ public class Main extends XposedModule {
                         new Thread(new Runnable() {
                             @Override
                             public void run() {
-                                String d = byHand
+                                // All three catalogues, in one account. Which of them was asked
+                                // and what each one said is the whole question behind "this
+                                // song never got lyrics", and asking them one probe at a time
+                                // means three runs against three different minutes.
+                                NcmLyrics.Query q = byHand
+                                        ? NcmLyrics.build(qTitle, qArtist, qAlbum, qDur)
+                                        : NcmLyrics.queryOf(w);
+                                String d = (byHand
                                         ? NcmLyrics.describe(qTitle, qArtist, qAlbum, qDur)
-                                        : NcmLyrics.describe(w);
+                                        : NcmLyrics.describe(w)) + WebLyrics.describe(q);
                                 Xp.log(TAG + "ncm: " + d);
                                 try {
                                     java.io.FileOutputStream os = new java.io.FileOutputStream(out);

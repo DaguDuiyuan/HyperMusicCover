@@ -46,6 +46,10 @@ final class LyricSource {
     static final int SRC_DATABASE = 2;
     /** Found by name on NetEase - the fallback for a session carrying neither of the above. */
     static final int SRC_NETEASE = 3;
+    /** Found by name on KuGou, which is asked when NetEase cannot place the song. */
+    static final int SRC_KUGOU = 4;
+    /** Found by name on LrcLib - the last net, and the one with the western catalogue. */
+    static final int SRC_LRCLIB = 5;
 
     interface Callback {
         /**
@@ -88,11 +92,12 @@ final class LyricSource {
         if (info == null) {
             return false;
         }
-        if (rawOfLyricInfo(info) != null) {
-            return true;
+        String raw = rawOfLyricInfo(info);
+        if (raw != null) {
+            return !placeholder(raw);
         }
         String text = textOfLyricInfo(info);
-        return text != null && timedLines(text) >= MIN_SESSION_LINES;
+        return text != null && timedLines(text) >= MIN_SESSION_LINES && !placeholder(text);
     }
 
     /** How many LRC timestamps a payload carries, counted no further than the answer needs. */
@@ -243,6 +248,105 @@ final class LyricSource {
             return null;
         }
     }
+
+    /**
+     * The translated lines out of that payload, as a plain LRC, or null when it carries none.
+     *
+     * Eight names for one field. The contract the provider modules were written against calls
+     * it "translation"; the players that publish their own lyricInfo, and the newer modules
+     * that append to what a player already wrote, use one of the others. Nothing in a payload
+     * says which convention it follows, so all of them are tried in the order a payload that
+     * has more than one would want - the specific names first, the bare "translation" last.
+     *
+     * Until this existed the session route dropped every translation it was handed: the field
+     * was read by the by-name routes, which fetch theirs separately, and by nothing else. A
+     * player publishing a translated lyric showed the original alone.
+     */
+    static String translationOfLyricInfo(String json) {
+        if (json == null || json.isEmpty()) {
+            return null;
+        }
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(json);
+            for (String key : TRANSLATION_KEYS) {
+                String s = jsonString(o, key);
+                if (s != null && TIMED.matcher(s).find()) {
+                    return s;
+                }
+            }
+            return null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static final String[] TRANSLATION_KEYS = {
+            "translationLyric", "translatedLyric", "translateLyric", "transLyric",
+            "lyricTranslation", "translationLrc", "transLrc", "translation",
+    };
+
+    /**
+     * Whether a payload is a stand-in for a lyric rather than one.
+     *
+     * "暂无歌词" under a [00:00.00] is a timed line by every test this file makes, and several
+     * players publish exactly that while they look - or when they have looked and found
+     * nothing. Taken at face value it is worse than an empty field: it counts as the session
+     * having this song's lyric, so the routes that might actually have found it are never asked,
+     * and the lock screen shows the words "no lyrics" scrolling past in the singing's place.
+     *
+     * Every line has to be one of these before the payload is rejected. A line of a real song
+     * can say anything, and a file is not a placeholder because one line of it matches.
+     */
+    static boolean placeholder(String text) {
+        if (text == null) {
+            return false;
+        }
+        // Walked rather than split: this is asked on every metadata change, the answer is no
+        // for every real lyric, and the first sung line settles it - so a whole file's worth of
+        // lines is neither allocated nor looked at.
+        boolean any = false;
+        int from = 0;
+        while (from <= text.length()) {
+            int nl = text.indexOf('\n', from);
+            String line = nl < 0 ? text.substring(from) : text.substring(from, nl);
+            from = (nl < 0 ? text.length() : nl) + 1;
+            String s = TAGS.matcher(line).replaceAll("").trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            any = true;
+            if (!isPlaceholder(s)) {
+                return false;
+            }
+        }
+        return any;
+    }
+
+    /** Timing and metadata tags alike: what is left of a line is what would be sung. */
+    private static final java.util.regex.Pattern TAGS =
+            java.util.regex.Pattern.compile("\\[[^\\]]*\\]|<[^>]*>");
+
+    private static boolean isPlaceholder(String line) {
+        String s = line.toLowerCase();
+        for (String p : PLACEHOLDERS) {
+            if (s.contains(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * What the players and the modules write when there is nothing to write.
+     *
+     * Matched by containment, because they are published with and without punctuation and with
+     * the song's name appended - NetEase's is "纯音乐，请欣赏" and Apple's is "No lyrics
+     * available". Lower-cased first, so the English ones are written that way here.
+     */
+    private static final String[] PLACEHOLDERS = {
+            "暂无歌词", "没有歌词", "未找到歌词", "歌词加载中", "正在加载歌词", "纯音乐",
+            "no lyrics", "no lyric", "lyrics not found", "instrumental",
+    };
 
     /** The payload's rawLyric, verbatim - the form that keeps word timings, when there are any. */
     static String rawOfLyricInfo(String json) {
@@ -555,7 +659,7 @@ final class LyricSource {
             @Override
             public void run() {
                 Rows r = new Rows();
-                // Three sources, best first, each one asked only because the one before it came
+                // Four sources, best first, each one asked only because the one before it came
                 // up empty. Every step falls through rather than stopping, which is the whole
                 // shape of this: a source that is present but useless - a provider module that
                 // wrote a lyricInfo it could not fill, an id the database does not have - used
@@ -566,6 +670,14 @@ final class LyricSource {
                 }
                 if (r.lines.isEmpty() && (id != null || q != null)) {
                     race(gen, id, dir, q, r);
+                }
+                // The other two catalogues, in order, and only for a song the first three could
+                // not place. Sequential rather than raced: this is the slow path by definition,
+                // nothing above it is still running by the time it starts, and a song that
+                // already works never reaches it, so what it costs is paid only by songs that
+                // would otherwise show nothing at all.
+                if (r.lines.isEmpty() && q != null) {
+                    web(q, r);
                 }
                 Xp.log("[MCLyric] " + pkg + " -> " + r.why);
                 onMain(cb, r.lines, r.why, r.source);
@@ -699,12 +811,23 @@ final class LyricSource {
                 r.why = "the session's lyricInfo is empty";
                 return;
             }
+            // "No lyrics for this song", timed and published as though it were the song. Caught
+            // before the parse rather than after it because what makes it a placeholder is its
+            // text, which the parsed rows keep but the account of them does not. Falls through
+            // to the catalogues, which is where this song's lyric actually is.
+            if (placeholder(raw != null ? raw : text)) {
+                r.why = "the session's lyricInfo says there are no lyrics";
+                return;
+            }
+            // The translation the payload came with, if it named it one of the eight ways a
+            // payload can. Joined to the lines by time, the same as NetEase's is.
+            String tr = translationOfLyricInfo(info);
             // The word-timed copy when there is one: "lyric" is the display form and is often
             // line-timed even when "rawLyric" has every word's timing, and preferring it left a
             // word-timed song with no word fill at all.
             String used = "lyric";
             if (raw != null) {
-                List<LyricLine> w = LyricParse.parse(raw);
+                List<LyricLine> w = LyricParse.parse(raw, tr);
                 for (LyricLine l : w) {
                     if (l.hasWords()) {
                         r.lines = w;
@@ -714,7 +837,7 @@ final class LyricSource {
                 }
             }
             if (r.lines.isEmpty() && text != null) {
-                r.lines = LyricParse.parse(text);
+                r.lines = LyricParse.parse(text, tr);
             }
             if (r.lines.isEmpty()) {
                 r.why = "lyricInfo parsed to nothing";
@@ -731,7 +854,8 @@ final class LyricSource {
                 return;
             }
             r.source = SRC_LYRIC_INFO;
-            r.why = r.lines.size() + " lines from the session's own lyricInfo (" + used + ")";
+            r.why = r.lines.size() + " lines from the session's own lyricInfo (" + used
+                    + (tr != null ? " + translation" : "") + ")";
         } catch (Throwable t) {
             Xp.log("[MCLyric] lyricInfo parse failed: " + t);
             r.lines = java.util.Collections.emptyList();
@@ -790,6 +914,29 @@ final class LyricSource {
         } catch (Throwable t) {
             Xp.log("[MCLyric] NetEase lookup failed: " + t);
             r.why = join(before, "NetEase error");
+        }
+    }
+
+    /** KuGou, then LrcLib - the catalogues asked when NetEase could not place the song. */
+    private static void web(NcmLyrics.Query q, Rows r) {
+        String before = r.why;
+        try {
+            WebLyrics.Found f = WebLyrics.load(q);
+            if (f == null) {
+                r.why = join(before, "no match on KuGou or LrcLib");
+                return;
+            }
+            // No second argument: a KRC carries its translation inside the body it hands over,
+            // where the parser reads it, and LrcLib publishes none at all.
+            r.lines = LyricParse.parse(f.body);
+            r.why = r.lines.isEmpty()
+                    ? join(before, f.who() + " " + f.id + " parsed to nothing " + shape(f.body))
+                    : r.lines.size() + " lines from " + f.who() + " " + f.id
+                    + " (" + (f.words ? "word-timed" : "line-timed") + ")";
+            if (!r.lines.isEmpty()) r.source = f.source;
+        } catch (Throwable t) {
+            Xp.log("[MCLyric] the second net failed: " + t);
+            r.why = join(before, "KuGou/LrcLib error");
         }
     }
 

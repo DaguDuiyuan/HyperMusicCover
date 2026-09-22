@@ -3,10 +3,6 @@ package com.os4.musiccover;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -59,7 +55,7 @@ final class NcmLyrics {
      * apart; a window of thirty would not, and would hand the lock screen a live take's timings
      * over a studio recording.
      */
-    private static final long DURATION_SLACK_MS = 3000L;
+    static final long DURATION_SLACK_MS = 3000L;
 
     /**
      * The window for a candidate that is on the session's own album, which is a wider one.
@@ -79,7 +75,7 @@ final class NcmLyrics {
      * whose album matches gets six seconds and a candidate whose album does not is left where it
      * was, still bounded by the window that was measured against real takes of real songs.
      */
-    private static final long SAME_ALBUM_SLACK_MS = 6000L;
+    static final long SAME_ALBUM_SLACK_MS = 6000L;
 
     /** What the session says about the song, reduced to the four things a match can use. */
     static final class Query {
@@ -558,7 +554,7 @@ final class NcmLyrics {
      * that parses to nothing, and because the answer is cached per track, the song played out
      * with no lyrics at all. Measured against the live response on the device, not reasoned.
      */
-    private static String str(org.json.JSONObject o, String key) {
+    static String str(org.json.JSONObject o, String key) {
         Object v = o.opt(key);
         if (!(v instanceof String)) {
             return null;
@@ -568,7 +564,7 @@ final class NcmLyrics {
     }
 
     /** Title and artist, which is what the search endpoint ranks on. */
-    private static String terms(Query q) {
+    static String terms(Query q) {
         return joined(q.title, firstArtist(q.artist));
     }
 
@@ -592,7 +588,7 @@ final class NcmLyrics {
      * ranks on the primary artist anyway. Whether a result is by this artist is a different
      * question and is asked of the whole string - see byArtist.
      */
-    private static String firstArtist(String artist) {
+    static String firstArtist(String artist) {
         int slash = artist.indexOf('/');
         return (slash > 0 ? artist.substring(0, slash) : artist).trim();
     }
@@ -788,7 +784,7 @@ final class NcmLyrics {
      * Asked of titles and of album names alike, which are the same problem: one name typed by two
      * catalogues.
      */
-    private static int nameScore(String wanted, String got) {
+    static int nameScore(String wanted, String got) {
         if (got.isEmpty()) {
             return 0;
         }
@@ -846,7 +842,7 @@ final class NcmLyrics {
      *
      * The script is the other thing that varies, and it is folded first - see folded().
      */
-    private static String norm(String s) {
+    static String norm(String s) {
         if (s == null) {
             return "";
         }
@@ -905,55 +901,19 @@ final class NcmLyrics {
     }
 
     /**
-     * One GET, with the connection left open for the next.
+     * One GET, and the record of whether it arrived.
      *
-     * disconnect() is deliberately not called: both requests here go to the same host, and
-     * leaving the connection in the keep-alive pool is what makes the second one cost 48-66ms
-     * instead of the ~250ms the first one does. The saving is the DNS lookup, the TCP handshake
-     * and the TLS handshake, measured at ~50ms of TLS alone on this device.
+     * The request itself is Http's, which is where the connection handling lives now that a
+     * second by-name route asks other catalogues the same way. What stays here is the one thing
+     * that is this route's own: a request that did not arrive must not be remembered as a song
+     * without lyrics. See load().
      */
     private static String get(String url) throws Exception {
-        long started = android.os.SystemClock.uptimeMillis();
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setConnectTimeout(4000);
-            conn.setReadTimeout(6000);
-            conn.setRequestProperty("User-Agent", "HyperMusicCover");
-            int code = conn.getResponseCode();
-            if (code != 200) {
-                Xp.log("[MCNcm] HTTP " + code + " in "
-                        + (android.os.SystemClock.uptimeMillis() - started) + "ms");
-                networkFailed = true;
-                return null;
-            }
-            return read(conn.getInputStream());
-        } catch (Throwable t) {
-            Xp.log("[MCNcm] request failed after "
-                    + (android.os.SystemClock.uptimeMillis() - started) + "ms: " + t);
+        Http.Reply r = Http.get(url, "MCNcm");
+        if (!r.ok()) {
             networkFailed = true;
-            // Only a connection that failed is torn down; a healthy one stays pooled.
-            if (conn != null) {
-                try {
-                    conn.disconnect();
-                } catch (Throwable ignored) {
-                }
-            }
-            return null;
         }
-    }
-
-    private static String read(InputStream in) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(32768);
-        byte[] buf = new byte[8192];
-        int n;
-        while ((n = in.read(buf)) > 0) {
-            out.write(buf, 0, n);
-        }
-        // Read to the end and closed, not disconnected: that is the condition for the socket to
-        // go back to the pool rather than be thrown away.
-        in.close();
-        return new String(out.toByteArray(), "UTF-8");
+        return r.body;
     }
 
     /**

@@ -481,8 +481,7 @@ final class LockLyrics {
                 // SRC_NONE is deliberately not an answer either way: finding nothing can mean
                 // the network was down or the song simply has no lyrics anywhere, neither of
                 // which says anything about the provider.
-                if (source == LyricSource.SRC_LYRIC_INFO || source == LyricSource.SRC_DATABASE
-                        || source == LyricSource.SRC_NETEASE) {
+                if (source != LyricSource.SRC_NONE) {
                     boolean fromSession = source == LyricSource.SRC_LYRIC_INFO;
                     if (fromSession != sSawSessionLyric) {
                         sSawSessionLyric = fromSession;
@@ -690,6 +689,10 @@ final class LockLyrics {
                 return "amll";
             case LyricSource.SRC_NETEASE:
                 return "netease";
+            case LyricSource.SRC_KUGOU:
+                return "kugou";
+            case LyricSource.SRC_LRCLIB:
+                return "lrclib";
             default:
                 return "none";
         }
