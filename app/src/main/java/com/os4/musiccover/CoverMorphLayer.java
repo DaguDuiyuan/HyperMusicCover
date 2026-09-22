@@ -23,18 +23,30 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     /** Per-frame scratch, kept rather than allocated on every draw. */
     private final int[] tmpLoc = new int[2];
     private final Rect srcRect = new Rect();
-    private final Bitmap art;
-    private final boolean cardMode;
+    private Bitmap art;
+    private boolean cardMode;
     private CoverMorphMotion.Box thumb, cover;
     private long lastFrame, startedAt;
-    private final boolean awaitArtworkPush;
+    private boolean awaitArtworkPush;
     private float fullAlpha;
     private boolean running;
 
-    private CoverMorphLayer(ViewGroup root, Bitmap art, boolean cardMode,
-                            CoverMorphMotion.Box thumb, CoverMorphMotion.Box cover,
-                            boolean toCover) {
-        super(root.getContext());
+    /**
+     * One per window, kept attached and INVISIBLE between morphs. Added at the start of every
+     * morph and removed at its end, it cost a layout of the whole shade window each time - the
+     * 25-35ms first frame measured on every toggle, which the tap handler itself (10-16ms, the
+     * morph's start ~4ms of it) did not account for. VISIBLE and INVISIBLE only redraw.
+     */
+    private CoverMorphLayer(Context context) {
+        super(context);
+        setClickable(false);
+        setFocusable(false);
+        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        setVisibility(INVISIBLE);
+    }
+
+    private void reset(Bitmap art, boolean cardMode, CoverMorphMotion.Box thumb,
+                       CoverMorphMotion.Box cover, boolean toCover) {
         this.art = art;
         this.cardMode = cardMode;
         this.thumb = thumb;
@@ -42,10 +54,10 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         awaitArtworkPush = toCover && !Main.coverModeOn();
         fullAlpha = toCover ? 1f : 0f;
         motion.value = toCover ? 0f : 1f;
+        motion.velocity = 0f;
         motion.aim(toCover);
-        setClickable(false);
-        setFocusable(false);
-        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        revealAt = 0L;
+        lastFrame = 0L;
     }
 
     /** Called before the state switch so the source is still at its visible location. */
@@ -75,12 +87,20 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         if (root == null || art == null || art.isRecycled() || thumb == null || cover == null) {
             return false;
         }
-        CoverMorphLayer v = new CoverMorphLayer(root, art, Main.coverMorphCardMode(),
-                thumb, cover, toCover);
-        root.addView(v, new ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        v.bringToFront();
-        sView = v;
+        CoverMorphLayer v = sView;
+        if (v == null || v.getParent() != root) {
+            if (v != null && v.getParent() instanceof ViewGroup) {
+                ((ViewGroup) v.getParent()).removeView(v);
+            }
+            v = new CoverMorphLayer(root.getContext());
+            root.addView(v, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            sView = v;
+        }
+        // bringToFront lays the parent out again too: only when something has come above it.
+        if (root.getChildAt(root.getChildCount() - 1) != v) v.bringToFront();
+        v.reset(art, Main.coverMorphCardMode(), thumb, cover, toCover);
+        v.setVisibility(VISIBLE);
         v.running = true;
         v.startedAt = SystemClock.uptimeMillis();
         v.setRequestedFrameRate(120f);
@@ -91,6 +111,12 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     }
 
     static boolean active() { return sView != null && sView.running; }
+
+    /** Leaves nothing held and the kept view idle; for a keyguard that is going away. */
+    private void release() {
+        art = null;
+        thumb = cover = null;
+    }
 
     /** How long the OEM thumbnail takes to fade back in under the copy that has landed on it. */
     private static final long THUMB_FADE_MS = 120L;
@@ -126,8 +152,12 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
             finish();
             return;
         }
+        // At most 20ms a frame. A tap into or out of cover mode costs its first frame 25-35ms
+        // (measured; a two-finger switch, which leaves cover mode alone, does not), and a spring
+        // stepped by the whole gap leapt the copy forward in one frame. Held to 20ms, it pauses
+        // for that frame instead; at 90-120Hz a real frame is 8-11ms and is never clipped.
         float dt = lastFrame == 0L ? 1f / 120f
-                : Math.min(0.05f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
+                : Math.min(0.02f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
         lastFrame = nowNs;
         motion.step(dt, Main.sClockResponse);
         CoverMorphMotion.Box liveThumb = Main.coverMorphThumbnail();
@@ -165,7 +195,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     }
 
     @Override protected void onDraw(Canvas canvas) {
-        if (!running || art.isRecycled()) return;
+        if (!running || art == null || art.isRecycled()) return;
         float density = getResources().getDisplayMetrics().density;
         CoverMorphMotion.Box box = CoverMorphMotion.frame(thumb, cover, motion.value, density);
         int[] root = tmpLoc;
@@ -209,12 +239,13 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     }
 
     private void finish() {
-        if (!running && sView != this) return;
+        if (!running) return;
         running = false;
         Choreographer.getInstance().removeFrameCallback(this);
         setRequestedFrameRate(0f);
-        if (sView == this) sView = null;
-        if (getParent() instanceof ViewGroup) ((ViewGroup) getParent()).removeView(this);
+        // Kept for the next morph; see the constructor.
+        if (getVisibility() != INVISIBLE) setVisibility(INVISIBLE);
+        release();
         Main.refreshMediaCardForMorph();
         CoverCardLayer.refresh();
     }
@@ -222,5 +253,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     @Override protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         if (running) finish();
+        // A rebuilt keyguard gets a view of its own.
+        if (sView == this) sView = null;
     }
 }

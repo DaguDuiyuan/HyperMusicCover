@@ -515,7 +515,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     @Override public void doFrame(long nowNs) {
         if (!ticking || !isAttachedToWindow()) { stop(); return; }
         float dt = lastFrame == 0L ? 1f / 60f
-                : Math.min(0.05f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
+                : Math.min(0.02f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
         lastFrame = nowNs;
         ClockCollapse.Phase phase = ClockCollapse.phase();
         boolean inAod = Main.coverCardInAod();
