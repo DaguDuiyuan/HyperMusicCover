@@ -1759,6 +1759,12 @@ public class Main extends XposedModule {
                         setResultData(aodProbe());
                     } else if ("entries".equals(op)) {
                         setResultData(ClockCollapse.entries());
+                    } else if ("poses".equals(op)) {
+                        setResultData(ClockCollapse.poses());
+                    } else if ("fall".equals(op)) {
+                        setResultData(ClockCollapse.fall());
+                    } else if ("card".equals(op)) {
+                        setResultData(cardHistory());
                     } else if ("depth".equals(op)) {
                         setDepthHidden(!i.getBooleanExtra("on", true));
                     } else if ("pushart".equals(op)) {
@@ -6721,6 +6727,85 @@ public class Main extends XposedModule {
     }
 
     /**
+     * The last few things that happened to the media card, as `op card` prints them.
+     *
+     * The card disappearing has three unrelated causes and the module can only see one of them
+     * directly. The OEM dropping its media data arrives here, at onCardChanged(null), and is
+     * recorded. A third party hiding the VIEW - HyperLight's music capsule rewrites
+     * MiuiMediaHeaderView's VISIBLE into GONE, measured 2026-09-21 - never reaches any hook of
+     * ours at all, so it leaves no event: what names it is the live snapshot `op card` takes
+     * before printing this, where our own state still says the card is up while the view on
+     * screen is GONE. A player dying shows up as the first with no track change before it.
+     *
+     * Nothing here hides or shows anything. Cover mode follows the card (see applyCardState);
+     * the card follows the OEM.
+     */
+    private static final String[] sCardLog = new String[10];
+    private static int sCardLogN;
+
+    private static String visName(int v) {
+        return v == View.VISIBLE ? "VISIBLE" : v == View.INVISIBLE ? "INVISIBLE" : "GONE";
+    }
+
+    /** One line about the card right now: our state, and the view as it stands. */
+    private static String cardSnapshot() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("auto=").append(sAuto).append(" cover=").append(sCoverMode)
+          .append(" known=").append(sCardKnown).append(" showing=").append(sCardShowing)
+          .append(" forced=").append(sCardForced)
+          .append(" token=").append(sCardToken != null)
+          .append(" key=").append(sCardKey == null || sCardKey.isEmpty() ? "-" : sCardKey);
+        View c = sCardGuarded;
+        if (c == null) {
+            try {
+                c = findSysuiView("mi_media_controls");
+            } catch (Throwable ignored) {
+            }
+        }
+        if (c == null) {
+            sb.append(" view=none");
+            return sb.toString();
+        }
+        sb.append(" view=").append(visName(c.getVisibility()))
+          .append(" shown=").append(c.isShown())
+          .append(" attached=").append(c.isAttachedToWindow())
+          .append(" alpha=").append(r2(c.getAlpha()))
+          .append(" h=").append(c.getHeight());
+        // Whoever is actually keeping it off screen, named. isShown() is false as soon as any
+        // ancestor is not VISIBLE, and which one it is decides whether this is the OEM's own
+        // layout or somebody else's setVisibility.
+        for (android.view.ViewParent vp = c.getParent(); vp instanceof View;
+             vp = ((View) vp).getParent()) {
+            View v = (View) vp;
+            if (v.getVisibility() != View.VISIBLE) {
+                sb.append(" hiddenBy=").append(idOf(v)).append('=')
+                  .append(visName(v.getVisibility()));
+                break;
+            }
+        }
+        return sb.toString();
+    }
+
+    private static void noteCard(String what) {
+        int n = ++sCardLogN;
+        sCardLog[(n - 1) % sCardLog.length] = "#" + n
+                + "@" + (android.os.SystemClock.uptimeMillis() / 100) / 10f + "s "
+                + what + " " + cardSnapshot();
+    }
+
+    /** The card's live state, then what has happened to it. Read by `op card`. */
+    static String cardHistory() {
+        StringBuilder sb = new StringBuilder("card now: " + cardSnapshot());
+        sb.append(" | events=").append(sCardLogN);
+        int keep = Math.min(sCardLogN, sCardLog.length);
+        for (int i = 0; i < keep; i++) {
+            String line = sCardLog[(sCardLogN - keep + i) % sCardLog.length];
+            if (line != null) sb.append(" | ").append(line);
+        }
+        return sb.toString();
+    }
+
+    /**
      * The card appeared, changed track, or went away. A track change arrives as a removal
      * followed by an add, so "gone" is only believed after CARD_GONE_MS - otherwise every skip
      * would tear the wallpaper down and put it straight back.
@@ -6741,6 +6826,7 @@ public class Main extends XposedModule {
             sCardKey = "";
         }
         Xp.log(TAG + "media card " + (showing ? "-> " + sCardKey : "gone"));
+        noteCard(showing ? "OEM says up" : "OEM says gone (waiting " + CARD_GONE_MS + "ms)");
         main().removeCallbacks(sCardGone);
         if (!sAuto) {
             sCardShowing = showing;
@@ -6758,6 +6844,7 @@ public class Main extends XposedModule {
         @Override
         public void run() {
             sCardShowing = false;
+            noteCard("gone stands, cover mode off");
             applyCardState();
         }
     };
@@ -7992,6 +8079,9 @@ public class Main extends XposedModule {
         // And which route took each of the last few entries, with what it found - a wake that
         // comes out two different ways is only visible here; see ClockCollapse.noteEntry.
         sb.append(" | ").append(ClockCollapse.entries());
+        // And where the clock has been placed since it last settled - a pose that moves after
+        // the spring has landed is one of these inputs moving; see ClockCollapse.notePose.
+        sb.append(" | ").append(ClockCollapse.poses());
         View date = visibleDate();
         sb.append(" | date=").append(date == null ? "none" : geomOf(date));
         for (View root : clockRoots()) {
@@ -7999,6 +8089,22 @@ public class Main extends XposedModule {
             if (g == null) continue;
             sb.append(" | tg scale=").append(g.getScaleY()).append(" ty=")
               .append(g.getTranslationY()).append(" vis=").append(g.getVisibility());
+            // Every view between the clock and the root that is scaling it, named. Which one
+            // holds the doze's 0.9516 is the difference between "the whole lock screen is
+            // zooming out of the AOD" and "the clock's own container is", and nothing else
+            // says: the pre-draw only ever sees the product. See ClockCollapse.aboveScaleY.
+            sb.append(" chain=");
+            float prod = 1f;
+            for (android.view.ViewParent p = g.getParent(); p instanceof View;
+                 p = ((View) p).getParent()) {
+                View v2 = (View) p;
+                prod *= v2.getScaleY();
+                if (v2.getScaleY() != 1f || v2.getTranslationY() != 0f) {
+                    sb.append(' ').append(idOf(v2)).append("=sy").append(r3(v2.getScaleY()))
+                      .append("/ty").append(r1(v2.getTranslationY()));
+                }
+            }
+            sb.append(" product=").append(r3(prod));
             break;
         }
         for (View root : clockRoots()) {

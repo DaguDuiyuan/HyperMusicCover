@@ -122,21 +122,43 @@ final class ClockCollapse {
     private static float sAodTop = Float.NaN, sAodUnit = Float.NaN, sAodDate = Float.NaN;
 
     /**
-     * The same doze pose as it was DRAWN, which is not the same numbers.
+     * The doze pose as the frame before last reported it, waiting for a frame that agrees.
      *
-     * The fields above are the OEM's layout box, and they are what the fall INTO the aod is aimed
-     * at and checked against when it lands (`LIVE.unit` in that check is a box height too, and
-     * DOZE_SETTLE_PX does not tolerate a scale's worth of difference). The box is taller than
-     * anything on screen, though: the OEM animates its AOD clock with a scale of its own.
+     * Not a pose anything is placed from: it is the previous reading, and a reading is only
+     * promoted to sAodTop/sAodUnit/sAodDate when the next one matches it.
      *
-     * A wake has to start from what was ON SCREEN. Measured 2026-09-21, it did not: the same wake
-     * came out two different ways - from 1328.9 (the box) when this doze's frames had run, and
-     * from the 1011 the screen actually had when they had not, because a doze with nothing
-     * recorded makes the wake fall back on captureFrom(), which does count the scale. What the
-     * user saw was the shrink starting from a clock that had never been drawn, at random, and
-     * only on the wakes that came after a doze long enough for a frame to run in it.
+     * This is what fixed the wake that came out two different ways (reported 2026-09-21, and
+     * again on 2026-09-22 when the first attempt turned out to be a no-op). A wake runs the
+     * OEM's own clock animation for a good hundred milliseconds before any route of ours takes
+     * the entry, and those frames arrive in the AOD branch like any other: every one of them
+     * used to be written straight over the doze's pose, so the wake shrank from a clock that
+     * had never been on screen - 1328.9 recorded against the 1164.5 the entry read two frames
+     * later, 14%. Two readings that agree are a clock that is not being animated; one that is
+     * never agrees with itself.
      */
-    private static float sAodShowTop = Float.NaN, sAodShowUnit = Float.NaN, sAodShowDate = Float.NaN;
+    private static float sAodPendTop = Float.NaN, sAodPendUnit = Float.NaN;
+    /** How far two consecutive doze readings may differ and still count as a clock at rest. */
+    private static final float AOD_STEADY_PX = 0.5f;
+
+    /** The doze's scale as last read, split into the clock's own and the whole chain's. */
+    private static float sAodOwnScale = Float.NaN, sAodChainScale = Float.NaN;
+
+    /** The OEM's box on the previous frame of a fall, to see it come to rest. */
+    private static float sDozeSettleUnit = Float.NaN;
+    /** The destination the last transition frame aimed at, for the fall trace. */
+    private static float sLastToUnit = Float.NaN;
+    /** The OEM's layout numbers as they were when the doze pose was committed. See layoutNow. */
+    private static String sAodLayout = "none";
+
+    private static boolean steady(float now, float before) {
+        return !Float.isNaN(now) && !Float.isNaN(before) && Math.abs(now - before) <= AOD_STEADY_PX;
+    }
+
+    /** Nothing recorded yet this doze: the next two frames that agree start it over. */
+    private static void clearAodPend() {
+        sAodPendTop = Float.NaN;
+        sAodPendUnit = Float.NaN;
+    }
     /** Card progress (0 = OEM's look, 1 = cover look) at the two ends. */
     private static float sCardFrom, sCardTo;
     /**
@@ -171,6 +193,9 @@ final class ClockCollapse {
         sPerfN = 0;
         sPerfPreNs = sPerfPreMax = sPerfYNs = sPerfYMax = sPerfGapMax = sPerfLastAt = 0L;
     }
+
+    /** What the last transition cost, for `op aodprobe`. See land(). */
+    private static String sLastFlight = "none";
 
     private static String perfLine() {
         int n = Math.max(1, sPerfN);
@@ -293,13 +318,13 @@ final class ClockCollapse {
             Xp.log(TAG + "clock: cover look on (floor y=" + Main.r1(floor) + ")");
             return;
         }
-        // The DRAWN pose, not the box: a wake that starts from the box is starting from a clock
-        // the doze never showed - see sAodShowTop.
-        boolean fromAod = was == Phase.AOD && !Float.isNaN(sAodShowTop);
+        // The pose the doze settled at, which is only ever written while the doze's clock is
+        // standing still - see sAodPendTop.
+        boolean fromAod = was == Phase.AOD && !Float.isNaN(sAodTop);
         if (fromAod) {
-            sFromTop = sAodShowTop;
-            sFromUnit = sAodShowUnit;
-            sFromDate = sAodShowDate;
+            sFromTop = sAodTop;
+            sFromUnit = sAodUnit;
+            sFromDate = sAodDate;
         } else {
             captureFrom();
             if (was == Phase.OFF && !wake && !Float.isNaN(sFromTop)) noteNaturalUnit(LIVE.unit);
@@ -318,12 +343,14 @@ final class ClockCollapse {
         // A wake's glyphs already settle after the size, on the OEM's own animation; a toggle's
         // are given the same tail. See TOGGLE_GLYPH_RESPONSE.
         start(Phase.ENTER, wake ? Float.NaN : TOGGLE_GLYPH_RESPONSE);
-        // The OEM's own ink box at this instant - the one reading that says whether its wake
-        // animation had already begun when this entry was taken, which is the whole question when
-        // the same wake comes out two different ways. See noteEntry.
-        float oemUnit = LIVE.unit;
-        if (measure(ENTRY)) oemUnit = ENTRY.unit;
-        noteEntry(src, wake, animate, fromAod, sYFrom, sYTo, sFromTop, sFromUnit, oemUnit);
+        // The OEM's own ink box as last measured - the reading that says whether its wake
+        // animation had already begun when this entry was taken. LIVE, never a measurement of
+        // its own: the entry that matters is taken from inside the pre-draw, where LIVE is this
+        // frame's already, and a second glyphBox(true) there walks both clock trees again on the
+        // one frame of the wake that has the least room for it (reported as a stutter in the
+        // first frames, 2026-09-22). On the other routes it is a frame or two old, which is all
+        // this field was ever read for. See noteEntry.
+        noteEntry(src, wake, animate, fromAod, sYFrom, sYTo, sFromTop, sFromUnit, LIVE.unit);
         Xp.log(TAG + "clock: enter" + (wake ? " from the AOD" : "") + " y " + Main.r1(sYFrom)
                 + " -> " + Main.r1(sYTo) + " from " + was);
     }
@@ -373,6 +400,8 @@ final class ClockCollapse {
      */
     static void toAod() {
         sWaking = false;
+        // The doze about to start has drawn nothing yet, so it has no pose to be steady against.
+        clearAodPend();
         // The start pose is read BEFORE the OEM's y goes back: the y changes the OEM's box at
         // once, and the transforms on the views still describe the old one - reading after would
         // start the spring from a clock several times the size of the one on screen.
@@ -415,7 +444,6 @@ final class ClockCollapse {
                 sAodHeld = false;
                 sPhase = Phase.AOD;
                 sAodTop = Float.NaN;
-                sAodShowTop = Float.NaN;
                 install();
                 Xp.log(TAG + "clock: watching the AOD");
                 return;
@@ -455,6 +483,7 @@ final class ClockCollapse {
             return;
         }
         sAodHeld = false;
+        sDozeSettleUnit = Float.NaN;
         sCardFrom = Main.cardProgress();
         sCardTo = sCardFrom;
         sGlassFrom = sGlassP;
@@ -551,6 +580,139 @@ final class ClockCollapse {
                 + " aodUnit=" + Main.r1(sAodUnit);
     }
 
+    /**
+     * Every pose the SETTLED clock has been placed at, with what decided it.
+     *
+     * A transition ends on a spring landing, but the pose it lands on is re-derived on every
+     * frame after it, and nothing on screen says which of those inputs moved when the clock is
+     * seen to shift a moment after it stopped (reported 2026-09-22 for a wake: "停完过一会儿又
+     * 挪一次"). Each line is a pose that differs from the one before it by more than half a
+     * pixel, so a clock that is standing still costs three compares a frame and says nothing.
+     *
+     * The first line after a landing is the landing itself: land() forgets the last pose, so the
+     * first settled frame always records.
+     */
+    private static final String[] sPoseLog = new String[8];
+    private static int sPoseN;
+    private static float sPoseTop = Float.NaN, sPoseUnit = Float.NaN, sPoseDate = Float.NaN;
+
+    /** NaN counts as equal to NaN: a style with no date must not record a pose every frame. */
+    private static boolean samePose(float a, float b) {
+        if (Float.isNaN(a) && Float.isNaN(b)) return true;
+        return Math.abs(a - b) <= 0.5f;
+    }
+
+    private static void notePose(Live m, float top, float unit, float date, float full,
+                                 float room) {
+        if (samePose(top, sPoseTop) && samePose(unit, sPoseUnit) && samePose(date, sPoseDate)) {
+            return;
+        }
+        sPoseTop = top;
+        sPoseUnit = unit;
+        sPoseDate = date;
+        int n = ++sPoseN;
+        sPoseLog[(n - 1) % sPoseLog.length] = "#" + n
+                + "@" + (android.os.SystemClock.uptimeMillis() / 100) / 10f + "s"
+                + " top=" + Main.r1(top) + " unit=" + Main.r1(unit) + " date=" + Main.r1(date)
+                // What the pose is derived from, so the line that moved names itself: the date
+                // line and the date's own height place an anchored clock, the full unit sizes
+                // it, and the room below is the only thing that can push it back up.
+                + " | line=" + Main.r1(coverDateY(m.date)) + " dateH=" + Main.r1(m.dateH)
+                + " full=" + Main.r1(full) + " room=" + Main.r1(room)
+                + " anchored=" + m.anchored + " dateView=" + (m.date == null ? "none"
+                        : Integer.toHexString(System.identityHashCode(m.date)))
+                + " | oem top=" + Main.r1(m.inkTop) + " unit=" + Main.r1(m.unit)
+                + " dateTop=" + Main.r1(m.dateTop)
+                + " y=" + Main.sHoldY + " natural=" + Main.r1(naturalY())
+                + " floor=" + Main.r1(sFloor);
+    }
+
+    /** The settled-pose log, oldest first. Read by `op poses`; see notePose. */
+    static String poses() {
+        StringBuilder sb = new StringBuilder("poses=" + sPoseN);
+        int keep = Math.min(sPoseN, sPoseLog.length);
+        for (int i = 0; i < keep; i++) {
+            String s = sPoseLog[(sPoseN - keep + i) % sPoseLog.length];
+            if (s != null) sb.append(" || ").append(s);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * The fall into the AOD, frame by frame: what the OEM's own clock was doing underneath and
+     * where we were aiming while it did.
+     *
+     * The destination of this one transition is a pose REMEMBERED from the last doze, because
+     * the OEM's live clock at the moment the fall starts is still the lock screen's. How long
+     * it stays the lock screen's, and what it does on its way to the doze, is the whole
+     * question - it decides whether a live aim is usable and from which frame - and it cannot
+     * be seen: the two poses differ by a few percent and the fall is over in twenty frames.
+     *
+     * Four numbers a frame for one transition, overwritten by the next. Read by `op fall`.
+     */
+    private static final int FALL_MAX = 96;
+    private static final float[] FALL_MS = new float[FALL_MAX];
+    private static final float[] FALL_OEM = new float[FALL_MAX];
+    private static final float[] FALL_TO = new float[FALL_MAX];
+    private static final float[] FALL_AT = new float[FALL_MAX];
+    private static int sFallN;
+    private static long sFallT0;
+    private static String sFallHow = "none";
+
+    private static final float[] FALL_T = new float[FALL_MAX];
+    private static final float[] FALL_AB = new float[FALL_MAX];
+
+    private static void noteFall(float oemUnit, float toUnit, float atUnit, float above) {
+        if (sFallN >= FALL_MAX) return;
+        int i = sFallN++;
+        FALL_MS[i] = android.os.SystemClock.uptimeMillis() - sFallT0;
+        FALL_OEM[i] = oemUnit;
+        FALL_TO[i] = toUnit;
+        FALL_AT[i] = atUnit;
+        FALL_T[i] = sT;
+        FALL_AB[i] = above;
+    }
+
+    /** How long after a transition starts the trace keeps recording, landing included. */
+    private static final long FLIGHT_TAIL_MS = 1500L;
+
+    /**
+     * The OEM's own layout numbers, as one string.
+     *
+     * maxSpace is the one that moves when the notification stack does, which is what a fall has
+     * to know and what the y at that moment turned out not to carry (measured 1682.9 on two
+     * falls either side of a dismissed notification). Read at the fall and again when a doze
+     * pose is committed, it says whether the two describe the same lock screen.
+     */
+    private static String layoutNow() {
+        View c = Main.sContainer;
+        try {
+            Object it = c == null ? null : Xp.getObjectField(c, "keyguardClockNotifInteractor");
+            if (it == null) return "none";
+            return "min=" + Main.r1(num(Xp.getObjectField(it, "timeMinHeight")))
+                    + " max=" + Main.r1(num(Xp.getObjectField(it, "adaptTimeHeight")))
+                    + " space=" + Main.r1(num(Xp.getObjectField(it, "maxSpace")));
+        } catch (Throwable t) {
+            return "unreadable";
+        }
+    }
+
+    /** The last fall into the AOD, frame by frame. See noteFall. */
+    static String fall() {
+        StringBuilder sb = new StringBuilder("flight " + sFallHow + " frames=" + sFallN
+                + " aodUnit=" + Main.r1(sAodUnit)
+                + " | layout at the doze: " + sAodLayout
+                + " | layout now: " + layoutNow());
+        for (int i = 0; i < sFallN; i++) {
+            sb.append(" | ").append(Math.round(FALL_MS[i])).append("ms t=")
+              .append(Main.r2(FALL_T[i])).append(" oem=")
+              .append(Main.r1(FALL_OEM[i])).append(" to=").append(Main.r1(FALL_TO[i]))
+              .append(" at=").append(Main.r1(FALL_AT[i]))
+              .append(" ab=").append(Main.r3(FALL_AB[i]));
+        }
+        return sb.toString();
+    }
+
     /** The entry log, oldest first. Read by `op entries`; see noteEntry. */
     static String entries() {
         StringBuilder sb = new StringBuilder("entries=" + sEntryN);
@@ -572,7 +734,9 @@ final class ClockCollapse {
                 + " heldY=" + Main.r1(sAodHoldY)
                 + " from top=" + Main.r1(sFromTop) + " unit=" + Main.r1(sFromUnit)
                 + " date=" + Main.r1(sFromDate)
-                + " aod top=" + Main.r1(sAodTop) + " unit=" + Main.r1(sAodUnit);
+                + " aod top=" + Main.r1(sAodTop) + " unit=" + Main.r1(sAodUnit)
+                + " scale own=" + Main.r3(sAodOwnScale) + " chain=" + Main.r3(sAodChainScale)
+                + " | last flight: " + sLastFlight;
     }
 
     // ------------------------------------------------------------------ the OEM's y
@@ -1023,6 +1187,10 @@ final class ClockCollapse {
     private static void start(Phase p, float glyphResponse) {
         stopFrame();
         perfReset();
+        sFallN = 0;
+        sFallT0 = android.os.SystemClock.uptimeMillis();
+        sFallHow = p + (sExitToAod ? "(to AOD)" : "") + " y=" + Main.r1(naturalY())
+                + " | layout: " + layoutNow();
         sPhase = p;
         sT = 0f;
         sTv = 0f;
@@ -1098,8 +1266,16 @@ final class ClockCollapse {
                 // landing now would clear our transforms off a clock still bigger than the one we
                 // drew. Wait until the OEM's own clock has come down to the doze. LAND_ANYWAY_MS
                 // in toAod() lands a doze that never settles.
-                if (done && sExitToAod && !Float.isNaN(sAodUnit) && !Float.isNaN(LIVE.unit)) {
-                    done = Math.abs(LIVE.unit - sAodUnit) <= DOZE_SETTLE_PX;
+                if (done && sExitToAod && !Float.isNaN(LIVE.unit)) {
+                    // The spring finishing is not the same as the clock being where the
+                    // hand-over needs it: the destination is the OEM's own clock and it is
+                    // still walking to the doze. Wait for that to come to rest - two readings
+                    // that agree - rather than for it to reach a figure, which is what a
+                    // remembered figure could not deliver once it went stale.
+                    boolean rest = !Float.isNaN(sDozeSettleUnit)
+                            && Math.abs(LIVE.unit - sDozeSettleUnit) <= DOZE_SETTLE_PX;
+                    sDozeSettleUnit = LIVE.unit;
+                    done = rest;
                 }
                 if (sPerfLastAt != 0L) sPerfGapMax = Math.max(sPerfGapMax, now - sPerfLastAt);
                 sPerfLastAt = now;
@@ -1142,9 +1318,14 @@ final class ClockCollapse {
     }
 
     private static void land() {
+        // Kept, not only logged: the module's log is dropped by the log daemon on some builds
+        // (this phone keeps nothing below error level), and the frame gap is the one number
+        // that says whether a transition stuttered. Read back by `op aodprobe`.
+        sLastFlight = sPhase + (sExitToAod ? "(to AOD)" : "") + " " + perfLine();
         Xp.log(TAG + "clock: " + sPhase + (sExitToAod ? "(to AOD)" : "") + " landed, " + perfLine());
         if (sPhase == Phase.ENTER) {
             sPhase = Phase.ON;
+            sPoseTop = Float.NaN;
             Xp.log(TAG + "clock: cover look settled");
         } else if (sPhase == Phase.EXIT) {
             if (sExitToAod) {
@@ -1152,6 +1333,7 @@ final class ClockCollapse {
                 // listener stays to remember what the AOD draws.
                 sExitToAod = false;
                 sPhase = Phase.AOD;
+                clearAodPend();
                 clearTransforms();
                 Main.restoreGlass();
                 Xp.log(TAG + "clock: in the AOD");
@@ -1179,7 +1361,7 @@ final class ClockCollapse {
         sTv = 0f;
         sFromTop = Float.NaN;
         sAodTop = Float.NaN;
-        sAodShowTop = Float.NaN;
+        clearAodPend();
         sGlassP = 0f;
         uninstall();
         clearTransforms();
@@ -1342,16 +1524,40 @@ final class ClockCollapse {
 
     private static final Live LIVE = new Live();
 
-    /**
-     * A second measurement, taken at the moment of an entry into the cover look and kept out of
-     * LIVE so it cannot disturb the frame that is about to be drawn. For noteEntry.
-     */
-    private static final Live ENTRY = new Live();
-
     private static float parentTop(View v) {
         if (!(v.getParent() instanceof View)) return 0f;
         ((View) v.getParent()).getLocationOnScreen(LOC);
         return LOC[1];
+    }
+
+    /**
+     * How much taller than its layout this view is being drawn: its own scale times every
+     * ancestor's.
+     *
+     * An ink box is measured in the target's own coordinates, so it says nothing about a scale
+     * anywhere above it. Nothing is PLACED through this - a pose is written in the lock screen's
+     * own pixels and the keyguard's shared zoom is left in the ancestors, see writePose - but it
+     * is what names that zoom for the probe and the flight trace.
+     */
+    private static float chainScaleY(View v) {
+        float s = 1f;
+        for (View p = v; p != null; ) {
+            s *= p.getScaleY();
+            p = p.getParent() instanceof View ? (View) p.getParent() : null;
+        }
+        return s;
+    }
+
+    /**
+     * The same product over this view's ANCESTORS only - the keyguard's shared zoom, with the
+     * clock's own transform left out.
+     *
+     * 0.95 through a doze and back to 1 across the wake, all of it on keyguard_root_view
+     * (measured 2026-09-22). The clock rides it; this only reports it, as `ab=` in the flight
+     * trace, which is how the ride was shown to converge with the rest of the screen.
+     */
+    private static float aboveScaleY(View v) {
+        return v.getParent() instanceof View ? chainScaleY((View) v.getParent()) : 1f;
     }
 
     private static View firstTarget() {
@@ -1419,6 +1625,10 @@ final class ClockCollapse {
             return;
         }
         View g = firstTarget();
+        // In the same space writePose writes: the clock's own transform over the OEM's box,
+        // with the keyguard's shared zoom left in the ancestors where it belongs. Reading
+        // through that zoom instead (tried 2026-09-22) puts this route 5% below the one that
+        // reads a recorded doze pose, because that pose is a box.
         sFromTop = m.inkTop + g.getTranslationY();
         sFromUnit = m.unit * g.getScaleY();
         sFromDate = m.date == null ? Float.NaN : m.dateTop + m.date.getTranslationY();
@@ -1454,15 +1664,10 @@ final class ClockCollapse {
                 // only reaches the OEM when the value is news, so this is one notifStateChange.
                 if (!Float.isNaN(sAodHoldY)) hold(sAodHoldY);
                 writePose(m, sFromTop, sFromUnit, sFromDate, false);
-                // The wake starts from what is on screen, which is this pose - and here the pose
-                // IS ours, so the box and the drawn pose are the two recorded the same way; see
-                // sAodShowTop for which of them a wake reads.
+                // The wake starts from what is on screen, which is this pose.
                 sAodTop = sFromTop;
                 sAodUnit = sFromUnit;
                 sAodDate = sFromDate;
-                sAodShowTop = sFromTop;
-                sAodShowUnit = sFromUnit;
-                sAodShowDate = sFromDate;
                 return;
             } else {
                 // The OEM's clock as it is. What it looks like here is the wake's start.
@@ -1472,17 +1677,36 @@ final class ClockCollapse {
                 // album art behind the glyphs and nothing else describes the picture the clock is
                 // on, and holds nothing at all for a full-screen doze whose clock was handed back,
                 // where the user asking for the system's clock means the system's colour too.
-                clearTransforms();
-                sAodTop = m.inkTop;
-                sAodUnit = m.unit;
-                sAodDate = m.dateTop;
-                // And the same pose as the screen is showing it, for the wake to start from - see
-                // sAodShowTop. The scale is the OEM's own here: nothing of ours is on the clock.
+                // What the keyguard is being scaled by around the clock, read BEFORE the
+                // clear because our own leftovers are part of that product. Recorded for the
+                // probe only: the pose below is in the lock screen's own pixels and the zoom
+                // stays in the ancestors, where writePose leaves it. Measured 2026-09-22:
+                // `own` is 1 and the 0.95 is all keyguard_root_view's, so the clear below is
+                // tidying up after us rather than fighting the OEM's doze animation.
                 View tg = firstTarget();
-                float sc = tg == null ? 1f : tg.getScaleY();
-                sAodShowTop = m.inkTop + (tg == null ? 0f : tg.getTranslationY());
-                sAodShowUnit = m.unit * sc;
-                sAodShowDate = m.date == null ? Float.NaN : m.dateTop + m.date.getTranslationY();
+                sAodOwnScale = tg == null ? 1f : tg.getScaleY();
+                sAodChainScale = chainScaleY(tg);
+                clearTransforms();
+                // Only a pose the doze has been HOLDING is a pose the doze was showing.
+                //
+                // A wake runs the OEM's own clock animation for a good hundred milliseconds
+                // before any route of ours takes the entry, and those frames arrive here, still
+                // in Phase.AOD. Every one of them used to be written straight over the doze's
+                // pose, so the wake shrank from a clock that had never been on screen: measured
+                // on houji, a doze drawn at 1328.9 against the 1164.5 the entry read two frames
+                // later, 14% - which is the whole of "单纯点击会在两种动画里随机出现".
+                //
+                // Two readings that agree are a clock that is not being animated; one that is
+                // never agrees with itself. Both poses are gated together, because the box has a
+                // second consumer with the same need - the fall INTO the doze aims at sAodUnit.
+                if (steady(m.inkTop, sAodPendTop) && steady(m.unit, sAodPendUnit)) {
+                    sAodTop = m.inkTop;
+                    sAodUnit = m.unit;
+                    sAodDate = m.dateTop;
+                    sAodLayout = layoutNow();
+                }
+                sAodPendTop = m.inkTop;
+                sAodPendUnit = m.unit;
                 Main.holdAodColour();
                 return;
             }
@@ -1558,10 +1782,30 @@ final class ClockCollapse {
             // their spring, one smooth curve in the OEM's own proportions the whole way, so never
             // wider than the clock it lands on. A width cap tried first put a kink in the growth
             // where it started to bind (40px a frame to 14 in one frame) - the "顿" at the end.
-            boolean doze = !in && sExitToAod && !Float.isNaN(sAodUnit);
-            float toTop = in ? coverTop : (doze ? sAodTop : m.inkTop);
-            float toUnit = in ? coverUnit : (doze ? sAodUnit : m.unit);
-            float toDate = in ? coverDate : (doze ? sAodDate : m.dateTop);
+            //
+            // Every one of these is a pose in SCREEN pixels, because that is what writePose
+            // takes, and leaving - either way - aims at the OEM's own clock as it would be
+            // drawn with nothing of ours on it. Re-derived every frame, so whatever the OEM is
+            // doing underneath IS the destination, and the last frame of the walk is already
+            // the pose the hand-back leaves on screen: clearing our transforms then changes
+            // nothing, by construction.
+            //
+            // The fall into the doze used to aim at a pose REMEMBERED from the last doze, on a
+            // reading taken 2026-09-19 that had the OEM's live clock grow past the doze and
+            // come back down. It does not, on this build: `op fall` traced a whole fall on
+            // 2026-09-22 and the OEM's box rises monotonically from the held clock to the doze
+            // (337 -> 1162.9), stops there, and our walk lands on it to within 0.1px. What the
+            // remembered pose did do was go stale - dismiss a notification and the next doze
+            // lays its clock out 14% differently (1328.9 against 1168.9, both measured) - so
+            // the fall drove to where the LAST doze had been, and the settle test, comparing
+            // the OEM's live box against that same stale figure, could never pass: the walk sat
+            // there until LAND_ANYWAY_MS gave up and the clock jumped to where it belonged.
+            // Reported 2026-09-22 as 划掉通知后息屏，时钟还在没划掉的位置，过一段时间又跳回正
+            // 确的位置. Nothing remembered, nothing to go stale.
+            float toTop = in ? coverTop : m.inkTop;
+            float toUnit = in ? coverUnit : m.unit;
+            float toDate = in ? coverDate : m.dateTop;
+            sLastToUnit = toUnit;
             top = sFromTop + (toTop - sFromTop) * t;
             unit = sFromUnit + (toUnit - sFromUnit) * t;
             date = Float.isNaN(sFromDate) ? toDate : sFromDate + (toDate - sFromDate) * t;
@@ -1571,6 +1815,21 @@ final class ClockCollapse {
         }
 
         writePose(m, top, unit, date, phase == Phase.ENTER && sGlyphTail);
+        if (phase == Phase.ON) notePose(m, top, unit, date, full, room);
+        // Once per drawn frame: onGlyphDrawn re-places from inside the draw, so this runs
+        // three times a frame on this style and a trace that kept them all covered a third of
+        // one transition. See sRedoing.
+        //
+        // Kept running for FLIGHT_TAIL_MS past the start, so it covers the landing and what
+        // happens after it. That tail is the whole question for a wake: the OEM zooms the
+        // WHOLE keyguard (keyguard_root_view, 0.95 in the doze, measured 2026-09-22) back to 1
+        // on its own schedule, and whether that finishes before or after our spring lands
+        // decides whether the clock may simply ride it. `ab=` is that zoom.
+        if (!sRedoing && sFallN < FALL_MAX
+                && android.os.SystemClock.uptimeMillis() - sFallT0 < FLIGHT_TAIL_MS) {
+            View gt = firstTarget();
+            noteFall(m.unit, sLastToUnit, unit, gt == null ? 1f : aboveScaleY(gt));
+        }
         Main.setCardProgressFrom(card);
         sGlassP = glass;
         Main.applyGlassMorph(glass);
@@ -1590,6 +1849,19 @@ final class ClockCollapse {
      * @param holdWidth keep the drawn width from growing - the entry's glyph tail; see the call
      */
     private static void writePose(Live m, float top, float unit, float date, boolean holdWidth) {
+        // A pose is in the lock screen's OWN pixels, and the OEM is free to scale the lock
+        // screen as a whole underneath it. It does: `keyguard_root_view` sits at 0.95 through a
+        // doze and walks back to 1 across the wake (measured 2026-09-22). The clock rides that
+        // like the notifications, the media card and everything else in the keyguard do - the
+        // ink lands where this says on a keyguard drawn at 1, and wherever the keyguard is
+        // drawn at 0.95, a 48px zoom at the top of the screen, the clock goes with it.
+        //
+        // Dividing that scale out was tried and put back (2026-09-22). It pins the clock and the
+        // date to absolute screen pixels, which makes them the only two things on the lock
+        // screen NOT zooming out of the AOD - reported as 息屏稳定后点亮和反复息屏点亮的
+        // 动画不一样, since a wake that never reached the doze has no zoom to divide out. What
+        // the ride leaves behind is a few pixels: the zoom is 0.995 by the time our spring
+        // lands and 1 some 135ms later, and it converges with the rest of the screen.
         float scale = unit / m.unit;
         sInkBottom = top + m.box.height() * scale;
         float scaleX = scale;
@@ -1658,8 +1930,6 @@ final class ClockCollapse {
         sAodTop = Float.NaN;
         sAodUnit = Float.NaN;
         sAodDate = Float.NaN;
-        sAodShowTop = Float.NaN;
-        sAodShowUnit = Float.NaN;
-        sAodShowDate = Float.NaN;
+        clearAodPend();
     }
 }
