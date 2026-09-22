@@ -97,12 +97,22 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         v.bringToFront();
-        if (v.wash.getParent() != layer) {
+        // Beside keyguard_root_view rather than inside it: the doze zooms that view to 0.95 and
+        // its bounds clip after the zoom, so nothing under it reaches the screen edge - a
+        // counter-scaled wash in the layer was measured still cut to 95%. Just below it keeps
+        // the same stacking the layer gave. The layer is the fallback, zoom and all.
+        ViewGroup host = layer;
+        View below = v;
+        View zoomed = zoomedRoot(layer);
+        if (zoomed != null && zoomed.getParent() instanceof ViewGroup) {
+            host = (ViewGroup) zoomed.getParent();
+            below = zoomed;
+        }
+        if (v.wash.getParent() != host) {
             if (v.wash.getParent() instanceof ViewGroup) {
                 ((ViewGroup) v.wash.getParent()).removeView(v.wash);
             }
-            // Just under the square, so the square still draws over the wash.
-            layer.addView(v.wash, layer.indexOfChild(v), new ViewGroup.LayoutParams(
+            host.addView(v.wash, host.indexOfChild(below), new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         v.style = sStyle;
@@ -110,6 +120,17 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         v.watchGeometry(layer);
         v.adoptPending();
         v.start();
+    }
+
+    /** keyguard_root_view, the view the doze zooms, found upwards from the layer. */
+    private static View zoomedRoot(View from) {
+        int id = from.getResources().getIdentifier("keyguard_root_view", "id",
+                "com.android.systemui");
+        if (id == 0) return null;
+        for (Object p = from; p instanceof View; p = ((View) p).getParent()) {
+            if (((View) p).getId() == id) return (View) p;
+        }
+        return null;
     }
 
     private void watchGeometry(ViewGroup layer) {
@@ -531,12 +552,13 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     /**
      * The full-screen AOD's faint colour wash, as a view of its own beside the square.
      *
-     * The doze scales keyguard_root_view to 0.95 (`op cardstate` lists the chain), and
-     * keyguard_background_layer clips its children to their bounds, so a wash drawn by the card
-     * layer came out 5% short and framed by the dark wallpaper - drawing past the bounds is
-     * clipped away. A child's clip moves with the child's own transform, so this view is scaled
-     * back out by the inverse of the zoom instead. The zoom itself is right and stays: the square
-     * rides it with the rest of the lock screen, which is why the wash is not part of it.
+     * The doze scales keyguard_root_view to 0.95 (`op cardstate` lists the chain). Drawn inside
+     * it, the wash came out 5% short and framed by the dark wallpaper, and neither drawing past
+     * the card layer's bounds nor scaling this view back out by the inverse of the zoom got past
+     * that: the second one was measured landing on the full screen at (0,0) and still cut to
+     * 95%. So it lives beside keyguard_root_view, just below it (see attachNow), and fit() is
+     * left to undo whatever zoom is still above it - normally none. The zoom itself is right and
+     * stays: the square rides it with the rest of the lock screen.
      */
     private static final class Wash extends View {
         private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
