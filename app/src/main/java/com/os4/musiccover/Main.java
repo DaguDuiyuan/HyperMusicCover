@@ -762,6 +762,13 @@ public class Main extends XposedModule {
             HyperTweaks.plugin(param.getDefaultClassLoader());
             return;
         }
+        // The one player we hook. Its lyric never reaches the session on its own, so it is
+        // fetched and published from inside the app - see AppleLyrics. Nothing else about the
+        // module runs in this process.
+        if (AppleLyrics.PKG.equals(pkg)) {
+            AppleLyrics.handle(param.getDefaultClassLoader());
+            return;
+        }
         if (!"com.android.systemui".equals(pkg)) return;
 
         final ClassLoader cl = param.getDefaultClassLoader();
@@ -1914,6 +1921,25 @@ public class Main extends XposedModule {
                         // Also as the broadcast's result, which `am broadcast` prints: on a
                         // phone whose LSPosed log drops INFO lines this is the only way to read it.
                         setResultData(st);
+                    } else if ("lyricraw".equals(op)) {
+                        // The session's lyricInfo exactly as it was published, to a file.
+                        // metadump truncates every value at 160 characters, which is enough to
+                        // see that a payload is there and not enough to see what shape it is -
+                        // and NetEase's is a shape this module does not read yet.
+                        String raw = LyricSource.lyricInfoOf(sWatched);
+                        java.io.File rf = new java.io.File(c.getFilesDir(), "mc_lyricraw.txt");
+                        try {
+                            java.io.FileOutputStream os = new java.io.FileOutputStream(rf);
+                            os.write((raw == null ? "no lyricInfo on "
+                                    + (sWatched == null ? "no session"
+                                       : sWatched.getPackageName()) : raw).getBytes("UTF-8"));
+                            os.close();
+                            rf.setReadable(true, false);
+                            setResultData((raw == null ? "none" : raw.length() + " chars")
+                                    + " -> " + rf.getAbsolutePath());
+                        } catch (Throwable t) {
+                            setResultData("lyricraw failed: " + t);
+                        }
                     } else if ("local".equals(op)) {
                         // On a worker: this one reads the media database and then the file, and
                         // a broadcast receiver runs on the main thread.

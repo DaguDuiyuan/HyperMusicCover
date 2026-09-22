@@ -892,11 +892,24 @@ final class LyricSource {
             // The translation the payload came with, if it named it one of the eight ways a
             // payload can. Joined to the lines by time, the same as NetEase's is.
             String tr = translationOfLyricInfo(info);
-            // The word-timed copy when there is one: "lyric" is the display form and is often
-            // line-timed even when "rawLyric" has every word's timing, and preferring it left a
-            // word-timed song with no word fill at all.
+            // A whole-document form, when the payload carries one. Only our own Apple Music
+            // hook writes this today, and only for a duet, because it is the one thing the flat
+            // fields cannot say: LRC has no notion of who is singing, so a two-voice lyric read
+            // out of "lyric" or "rawLyric" comes back as one voice against one edge. Tried
+            // first and allowed to fail - if the document does not parse, the same lyric is
+            // still sitting in the fields below.
             String used = "lyric";
-            if (raw != null) {
+            String doc = jsonString(new org.json.JSONObject(info), "ttml");
+            if (doc != null && !doc.isEmpty()) {
+                List<LyricLine> d = LyricParse.parse(doc, tr);
+                if (!d.isEmpty()) {
+                    r.lines = d;
+                    used = "ttml";
+                } else {
+                    Xp.log("[MCLyric] the payload's ttml parsed to nothing; using its fields");
+                }
+            }
+            if (r.lines.isEmpty() && raw != null) {
                 List<LyricLine> w = LyricParse.parse(raw, tr);
                 for (LyricLine l : w) {
                     if (l.hasWords()) {

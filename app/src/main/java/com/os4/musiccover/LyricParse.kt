@@ -114,7 +114,25 @@ object LyricParse {
                         if (b.end > owner.end) owner.end = b.end
                     }
                 }
-                is KaraokeLine -> karaoke(line)?.let { out.add(it) }
+                is KaraokeLine -> {
+                    val main = karaoke(line)
+                    if (main != null) {
+                        out.add(main)
+                        // Where the accompaniment actually arrives. The branch above is written
+                        // for a parser that hands background vocals back as lines of their own,
+                        // and lyrics-core 0.4.7 does not: it hangs them on the main line as a
+                        // property, so that branch never fires and every background vocal was
+                        // being dropped. Both are kept - which shape comes back is the library's
+                        // business, and a version that goes back to separate lines still works.
+                        val acc = (line as? KaraokeLine.MainKaraokeLine)
+                            ?.accompanimentLines?.firstOrNull()
+                        val b = acc?.let { karaoke(it) }
+                        if (b != null) {
+                            main.bg = b
+                            if (b.end > main.end) main.end = b.end
+                        }
+                    }
+                }
                 is SyncedLine -> {
                     // Instrumental breaks arrive as empty lines; a row of nothing would take a
                     // slot in the stack for its whole duration.
