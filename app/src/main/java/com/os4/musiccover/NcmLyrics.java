@@ -253,18 +253,115 @@ final class NcmLyrics {
         } catch (Throwable t) {
             Xp.log("[MCNcm] failed: " + t);
         }
-        // A thrown request is not cached: the next attempt may be on a working network, and
-        // caching the network's bad minute as "this song has no lyrics" would outlast it.
-        if (got != null || !networkFailed) {
+        if (got != null) {
             synchronized (CACHE) {
-                CACHE.put(key, got == null ? NONE : got);
+                CACHE.put(key, got);
             }
+            return got;
+        }
+        // Nothing found - and whether that is worth remembering depends on why.
+        //
+        // A thrown request is not cached: the next attempt may be on a working network, and
+        // caching the network's bad minute as "this song has no lyrics" would outlast it. A
+        // search that answered with a page of wrong songs is the same mistake wearing a better
+        // disguise - it looks exactly like an honest miss from here, and costs the song its
+        // lyrics for the whole play. One extra request, once every half minute at most, buys
+        // the difference. See searchIsHonest().
+        if (networkFailed) {
+            return null;
+        }
+        if (!searchIsHonest()) {
+            Xp.log("[MCNcm] not remembering the miss for " + q + ": the search is not answering "
+                    + "honestly right now");
+            return null;
+        }
+        synchronized (CACHE) {
+            CACHE.put(key, NONE);
         }
         return got;
     }
 
     /** Set by the last request to fail on the network rather than on its answer. */
     private static volatile boolean networkFailed;
+
+    /**
+     * Whether the search is answering honestly, asked only when it matters.
+     *
+     * The endpoint's answer to being searched too much is not an error but a page of plausible
+     * wrong songs: covers with the right title, instrumentals, other artists' songs of the same
+     * name - everything except the recording asked for. From here that is indistinguishable from
+     * a song the catalogue does not have, and the two want opposite treatment. A song that is
+     * genuinely absent should be remembered as absent, or every screen-on spends the round trip
+     * again; a song hidden by a bad minute must NOT be, because the minute passes and the miss
+     * outlives it - cached per track, one bad minute costs that song its lyrics for the whole
+     * play.
+     *
+     * So the question is put to a song whose right answer is known. 七里香 is on the service and
+     * its id is 186001; a search that does not return it is not telling the truth, whatever it
+     * says about anything else. Measured 2026-09-22: in this state the search for it answered
+     * with ten covers, a music box version and two "pop beat" backing tracks, while the lyric
+     * endpoint handed over the real thing by id without complaint - the block is on searching,
+     * not on the catalogue.
+     *
+     * Written as escapes rather than characters because the build sets no source encoding.
+     */
+    private static final String HEALTH_TERMS = "七里香 周杰伦";
+    private static final String HEALTH_ID = "186001";
+    /** A wider page than the lookups use: honest or not, the answer is somewhere in the list. */
+    private static final String HEALTH_SEARCH =
+            "https://music.163.com/api/search/get?s=%s&type=1&limit=30";
+
+    /**
+     * How long one answer about the endpoint's honesty stands.
+     *
+     * Long enough that a run of misses costs one extra request rather than one each, short
+     * enough to follow the state changing - it clears on its own, and has taken anywhere from a
+     * few minutes to over forty.
+     */
+    private static final long HEALTH_TTL_MS = 30000L;
+    private static volatile long healthAt;
+    private static volatile boolean healthy = true;
+
+    /** True when the search can be believed - including when we could not find out. */
+    private static boolean searchIsHonest() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (healthAt != 0L && now - healthAt < HEALTH_TTL_MS) {
+            return healthy;
+        }
+        boolean ok = askHealth();
+        healthy = ok;
+        healthAt = now;
+        return ok;
+    }
+
+    private static boolean askHealth() {
+        try {
+            String json = get(String.format(HEALTH_SEARCH,
+                    URLEncoder.encode(HEALTH_TERMS, "UTF-8")));
+            // A request that did not arrive says nothing about honesty, and answering "lying"
+            // to it would stop every miss being remembered for as long as the network is down.
+            if (json == null) {
+                return true;
+            }
+            org.json.JSONArray songs = new org.json.JSONObject(json).getJSONObject("result")
+                    .getJSONArray("songs");
+            for (int i = 0; i < songs.length(); i++) {
+                // Compared as an id, not as text anywhere in the body: the same digits turn up
+                // as a duration and as other songs' ids, and a substring test would call a page
+                // of decoys honest.
+                if (HEALTH_ID.equals(String.valueOf(songs.getJSONObject(i).optLong("id")))) {
+                    return true;
+                }
+            }
+            Xp.log("[MCNcm] the search is serving decoys: " + HEALTH_TERMS + " came back without "
+                    + HEALTH_ID + " in " + songs.length() + " results");
+            return false;
+        } catch (Throwable t) {
+            // Same argument as a null body: not knowing is not evidence of lying.
+            Xp.log("[MCNcm] could not check the search's honesty: " + t);
+            return true;
+        }
+    }
 
     /**
      * The search response for one set of terms, so it can be fetched before it is needed.
@@ -363,10 +460,14 @@ final class NcmLyrics {
         }
     }
 
-    /** For op queue: whether reading ahead has anything in hand. */
+    /** For op queue: whether reading ahead has anything in hand, and who we last thought we were
+     * talking to. The honesty is reported as last decided, never asked for here - a diagnostic
+     * that sends a request of its own would be one more request against the thing it is
+     * measuring. "unknown" means nothing has missed yet, which is the healthy case. */
     static String describeSearches() {
         synchronized (SEARCHES) {
-            return "searches=" + SEARCHES.size();
+            return "searches=" + SEARCHES.size() + " honest="
+                    + (healthAt == 0L ? "unknown" : String.valueOf(healthy));
         }
     }
 
@@ -408,6 +509,11 @@ final class NcmLyrics {
             id = byAlbum(q);
         }
         if (id == null) {
+            // Whatever is held for these terms has now been shown to prove nothing, by every
+            // route. Dropping it matters most in the case it is hardest to see: a page of
+            // decoys kept for the two minutes this cache runs would hand the same page to the
+            // read-ahead and to every other song that searches the same terms.
+            forgetSearch(terms);
             Xp.log("[MCNcm] nothing matched " + q + " (searched \"" + terms
                     + "\", and its album)");
             return null;
