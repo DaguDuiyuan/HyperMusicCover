@@ -6912,10 +6912,18 @@ public class Main extends XposedModule {
      * off, and not an unlock and a lock again - it is the last session going away that clears it,
      * and the next thing the user plays then starts from the cover as it always did.
      */
+    /** The card's track when the running morph began; a different one is what cancels it. */
+    private static String sMorphKey = "";
+
+    private static void beginMorph(boolean toCover) {
+        if (!CoverMorphLayer.active()) sMorphKey = sCardKey;
+        CoverMorphLayer.begin(toCover);
+    }
+
     private static void exitFromTap(String why) {
         if (CoverMorphRoute.shouldMorph(LockLyrics.wantsAttached()
                 ? CoverMorphRoute.LYRICS : CoverMorphRoute.COVER,
-                CoverMorphRoute.NORMAL)) CoverMorphLayer.begin(false);
+                CoverMorphRoute.NORMAL)) beginMorph(false);
         else CoverMorphLayer.cancel();
         sTapSuppressed = true;
         Xp.log(TAG + why + ": leaving cover mode");
@@ -6937,7 +6945,7 @@ public class Main extends XposedModule {
         if (sAuto && sCardShowing && CoverMorphRoute.shouldMorph(CoverMorphRoute.NORMAL,
                 LockLyrics.willAttachOnTapEntry(sTappedBack)
                         ? CoverMorphRoute.LYRICS : CoverMorphRoute.COVER)) {
-            CoverMorphLayer.begin(true);
+            beginMorph(true);
         } else {
             CoverMorphLayer.cancel();
         }
@@ -7151,7 +7159,10 @@ public class Main extends XposedModule {
             sCardToken = null;
             sCardKey = "";
         }
-        if (!showing || (sCoverMode && !sameTrack(sCardKey, sTrackKey))) {
+        // Against the track the morph started on, not sTrackKey: a tap into cover mode clears
+        // that, the card is rebound as the cover goes up, and every entry was cancelled a couple
+        // of frames in - then begun again from the thumbnail by the entry's second call.
+        if (!showing || (CoverMorphLayer.active() && !sameTrack(sCardKey, sMorphKey))) {
             CoverMorphLayer.cancel();
         }
         Xp.log(TAG + "media card " + (showing ? "-> " + sCardKey : "gone"));
@@ -8054,7 +8065,7 @@ public class Main extends XposedModule {
             int to = LockLyrics.willAttachAfterTapToggle()
                     ? CoverMorphRoute.LYRICS : CoverMorphRoute.COVER;
             if (CoverMorphRoute.shouldMorph(from, to)) {
-                CoverMorphLayer.begin(to == CoverMorphRoute.COVER);
+                beginMorph(to == CoverMorphRoute.COVER);
             }
         }
         LockLyrics.toggleByTap(sTrackKey, sWatched);
