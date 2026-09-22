@@ -103,6 +103,8 @@ public class WallpaperProbe {
     private static volatile Bitmap sArt;
     /** Which of the two cover compositions the current source represents. */
     private static volatile boolean sCardMode;
+    /** When the running fade-out of the cover began, and how long it runs; 0 when none is. */
+    private static volatile long sLeaveAt, sLeaveMs;
 
     /**
      * SystemUI is showing lyrics over the cover, so the cover is drawn frosted - blurred and
@@ -1879,9 +1881,12 @@ public class WallpaperProbe {
                             final int artSeq = sArtSeq;
                             final boolean blurStillMine = blurMine;
                             if (fade && from != null && to != null) {
+                                sLeaveAt = SystemClock.uptimeMillis();
+                                sLeaveMs = sFadeMs;
                                 startFade(from, to, new Runnable() {
                                     @Override
                                     public void run() {
+                                        sLeaveAt = 0L;
                                         if (blurStillMine && msgSeq == sMsgSeq) {
                                             sLyricBlur = false;
                                             sLyricBlurWant = false;
@@ -2205,6 +2210,20 @@ public class WallpaperProbe {
         // cover yet, what it fades from is the lock wallpaper - that is cover mode opening, and
         // it travels with the clock. See sTrackFadeMs.
         boolean trackChange = from != null;
+        // Arriving while the last cover fades out. sArt still names that cover until the fade's
+        // end, but the eased fade has put the wallpaper on screen long before then: taken at its
+        // word, this faded from the old cover to the same cover - a cut from the wallpaper
+        // straight to the art, on every quick tap back in. Past half way, it is the wallpaper
+        // that is showing, and the way in starts from there.
+        long leaveAt = sLeaveAt;
+        sLeaveAt = 0L;
+        if (leaveAt != 0L && sOrig != null && sLeaveMs > 0L) {
+            float t = Math.min(1f, (SystemClock.uptimeMillis() - leaveAt) / (float) sLeaveMs);
+            if (1f - (1f - t) * (1f - t) * (1f - t) >= 0.5f) {
+                from = null;
+                trackChange = false;
+            }
+        }
         if (from == null) from = sOrig;
         // A cover carries what the lyrics wanted at the moment it was sent, so a track change is
         // also where the two processes settle any disagreement: a lost broadcast, or a switch
