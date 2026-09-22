@@ -48,6 +48,12 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     /** Called before the state switch so the source is still at its visible location. */
     static boolean begin(boolean toCover) {
         if (Looper.myLooper() != Looper.getMainLooper() || !Main.coverMorphEligible()) return false;
+        // The square card only. The full-screen cover keeps its own transition - the clock
+        // squeeze and the wallpaper crossfade - untouched.
+        if (!Main.coverMorphCardMode()) {
+            cancel();
+            return false;
+        }
         CoverMorphLayer old = sView;
         if (old != null && old.running) {
             if (old.cardMode == Main.coverMorphCardMode()) {
