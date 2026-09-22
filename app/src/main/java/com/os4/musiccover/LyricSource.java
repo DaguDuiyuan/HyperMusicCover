@@ -68,11 +68,106 @@ final class LyricSource {
      * {"lyric":"","noLyric":true} while it is still looking.
      */
     static boolean hasLyricInfo(MediaController c) {
-        String info = lyricInfoOf(c);
+        return usable(infoFor(c));
+    }
+
+    /**
+     * Whether a payload is worth starting a lookup for, without parsing it.
+     *
+     * The single-timestamp case is the one this exists for. Several players publish the line
+     * being sung under the same key as the whole lyric, and a payload carrying one line reads
+     * here as "the session has this song's lyric" - which is the answer that makes the caller
+     * throw away a whole file it already had. Counted rather than parsed because this is asked
+     * on every metadata change and the parse is the expensive half.
+     *
+     * Only the display field is counted. Word-timed payloads (YRC, QRC, TTML) do not use LRC's
+     * [mm:ss] tags at all, so there is nothing to count in rawLyric and it is taken at its word;
+     * what it actually holds is settled by parsing it, in session().
+     */
+    static boolean usable(String info) {
         if (info == null) {
             return false;
         }
-        return textOfLyricInfo(info) != null || rawOfLyricInfo(info) != null;
+        if (rawOfLyricInfo(info) != null) {
+            return true;
+        }
+        String text = textOfLyricInfo(info);
+        return text != null && timedLines(text) >= MIN_SESSION_LINES;
+    }
+
+    /** How many LRC timestamps a payload carries, counted no further than the answer needs. */
+    private static int timedLines(String text) {
+        java.util.regex.Matcher m = TIMED.matcher(text);
+        int n = 0;
+        while (n < MIN_SESSION_LINES && m.find()) {
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * How many lines a session payload must carry before it counts as this song's lyric.
+     *
+     * Two. One line is never a lyric file - it is the line being sung, or a placeholder like
+     * NetEase's "纯音乐，请欣赏" - and the smallest genuine
+     * payload measured here was eighteen lines, so there is nothing in between to get wrong.
+     */
+    private static final int MIN_SESSION_LINES = 2;
+
+    /**
+     * The payload the session is carrying, or null when it is not this song's.
+     *
+     * A track change is the one moment this field cannot be believed, and it is the only moment
+     * anyone reads it. The player rewrites the metadata and the lyric as two separate updates,
+     * so between them the session carries the new song's title over the old song's lyric.
+     * Measured 2026-09-20 on NetEase: one track was read 1ms after the card reported it and
+     * answered with a single line, which was then taken for that song's whole lyric, cached
+     * under its key, and - being recorded as the session's own - locked every better route out
+     * for the rest of the song. Five songs in one evening went that way.
+     *
+     * So the payload is asked which song it is for rather than assumed to be keeping up. Only a
+     * positive contradiction rejects it: a payload with no songName is common and says nothing
+     * either way, and a title carries decorations the payload need not repeat - a name and the
+     * same name followed by "(Live)" are the same song - so one containing the other is
+     * agreement.
+     */
+    static String infoFor(MediaController c) {
+        String info = lyricInfoOf(c);
+        if (info == null) {
+            return null;
+        }
+        String theirs = songNameOf(info);
+        String ours = titleOf(c);
+        if (theirs == null || ours == null) {
+            return info;
+        }
+        String a = theirs.trim().toLowerCase();
+        String b = ours.trim().toLowerCase();
+        if (a.isEmpty() || b.isEmpty() || a.contains(b) || b.contains(a)) {
+            return info;
+        }
+        Xp.log("[MCLyric] the session's lyricInfo is still \"" + theirs
+                + "\" while the track is \"" + ours + "\"; not reading it");
+        return null;
+    }
+
+    /** Which song the payload says it is for, or null when it does not say. */
+    private static String songNameOf(String json) {
+        try {
+            return jsonString(new org.json.JSONObject(json), "songName");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** What the session says is playing, for the payload to be held against. */
+    private static String titleOf(MediaController c) {
+        try {
+            MediaMetadata md = c.getMetadata();
+            return md == null ? null : md.getString(MediaMetadata.METADATA_KEY_TITLE);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private LyricSource() {
@@ -345,7 +440,9 @@ final class LyricSource {
     static void load(final MediaController c, final Callback cb) {
         final String pkg = c == null ? "?" : c.getPackageName();
 
-        final String info = lyricInfoOf(c);
+        // Not lyricInfoOf: at a track change the field routinely still holds the song before
+        // this one, and believing it is what cost five songs their lyrics. See infoFor().
+        final String info = infoFor(c);
         final String dir = dirFor(c);
         // An id is only worth having when there is a directory it belongs to; without one it
         // cannot be looked up anywhere, and pretending otherwise is how a lookup lands in the
@@ -529,6 +626,16 @@ final class LyricSource {
             }
             if (r.lines.isEmpty()) {
                 r.why = "lyricInfo parsed to nothing";
+                return;
+            }
+            // The counted check again, now that the payload has actually been parsed - which is
+            // the only way to reach a rawLyric's line count, and the only thing that can speak
+            // for a format whose timings are not LRC's. Rejected rather than shown, and rejected
+            // by falling through: a song whose session says one line is a song the two network
+            // routes have never been asked about, and they are where its lyric actually is.
+            if (r.lines.size() < MIN_SESSION_LINES) {
+                r.lines = java.util.Collections.emptyList();
+                r.why = "the session is publishing one line, not a lyric";
                 return;
             }
             r.source = SRC_LYRIC_INFO;
