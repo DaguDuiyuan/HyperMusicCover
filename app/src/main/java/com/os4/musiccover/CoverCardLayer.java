@@ -49,6 +49,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private CoverCardStyle style = sStyle;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final RectF square = new RectF();
+    /** Per-frame scratch, kept rather than allocated on every draw. */
+    private final Path clipPath = new Path();
+    private final int[] tmpLoc = new int[2];
     private ViewTreeObserver geometryObserver;
     private ViewTreeObserver.OnPreDrawListener geometryListener;
     private boolean lastLockEligible;
@@ -155,7 +158,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                 // Every frame of the window while the wash is up: the doze zoom it has to undo
                 // animates, and nothing else of ours is drawing frames through it.
                 if (wash.getVisibility() == VISIBLE) wash.fit();
-                int[] loc = new int[2];
+                int[] loc = tmpLoc;
                 getLocationOnScreen(loc);
                 float clock = ClockCollapse.contentBottomOnScreen();
                 float media = Main.coverCardMediaTop();
@@ -191,7 +194,15 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         CoverCardLayer v = sView;
         if (v != null) {
             v.style = config;
-            v.start();
+            // The pre-draw guard runs on every frame of the shade window, lock screen or not.
+            // Only the square needs it, so the full-screen cover does not pay for it.
+            if (config.mode == CoverCardStyle.CARD) {
+                if (v.getParent() instanceof ViewGroup) v.watchGeometry((ViewGroup) v.getParent());
+                v.start();
+            } else {
+                v.unwatchGeometry();
+                v.hideImmediately();
+            }
         }
     }
 
@@ -427,7 +438,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         super.onAttachedToWindow();
         // A detached/re-attached keyguard layer gets a new ViewTreeObserver. Keep the guard even
         // when SystemUI reuses this same card view for the shade.
-        if (getParent() instanceof ViewGroup) watchGeometry((ViewGroup) getParent());
+        if (style.mode == CoverCardStyle.CARD && getParent() instanceof ViewGroup) {
+            watchGeometry((ViewGroup) getParent());
+        }
     }
 
     @Override protected void onDetachedFromWindow() {
@@ -443,7 +456,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
 
     /** The square's place from the live clock and media card, in this view's coordinates. */
     private CoverCardStyle.Rect placeNow() {
-        int[] loc = new int[2];
+        int[] loc = tmpLoc;
         getLocationOnScreen(loc);
         return style.place(getWidth(), getHeight(), getResources().getDisplayMetrics().density,
                 ClockCollapse.contentBottomOnScreen() - loc[1],
@@ -561,9 +574,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         float radius = Math.min(20f * density, scaled * 0.10f);
         drawShadow(canvas, square, radius, density, opacity, paint);
         int save = canvas.save();
-        Path clip = new Path();
-        clip.addRoundRect(square, radius, radius, Path.Direction.CW);
-        canvas.clipPath(clip);
+        clipPath.reset();
+        clipPath.addRoundRect(square, radius, radius, Path.Direction.CW);
+        canvas.clipPath(clipPath);
         drawArt(canvas, previous, 1f);
         drawArt(canvas, current, fadeFraction());
         canvas.restoreToCount(save);
@@ -617,6 +630,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private static final class Wash extends View {
         private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
         private final int[] loc = new int[2];
+        private final RectF bounds = new RectF();
 
         Wash(Context context) {
             super(context);
@@ -674,8 +688,8 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             if (p == null || p.aodBackdrop == null || p.aodBackdrop.isRecycled()
                     || !Main.coverCardBackdropInAod()) return;
             paint.setAlpha(64);
-            canvas.drawBitmap(p.aodBackdrop, null, new RectF(0f, 0f, getWidth(), getHeight()),
-                    paint);
+            bounds.set(0f, 0f, getWidth(), getHeight());
+            canvas.drawBitmap(p.aodBackdrop, null, bounds, paint);
         }
     }
 

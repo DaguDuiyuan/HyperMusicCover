@@ -660,12 +660,14 @@ private fun LyricsGroup(
         ValueSlider(
             title = stringResource(R.string.lyric_font_weight),
             summary = stringResource(R.string.lyric_font_weight_summary),
-            value = module.lyricWeight.coerceIn(300, 900).toFloat(),
-            valueRange = 300f..900f,
+            value = module.lyricWeight.coerceIn(300, 700).toFloat(),
+            // MiSans VF, the lock screen's font, has a weight axis that ends at 700.
+            valueRange = 300f..700f,
             enabled = enabled && module.lyrics,
-            label = { "${(it.roundToInt() / 100) * 100}" },
+            // The number shown is the number sent: both go through lyricWeightOf.
+            label = { "${lyricWeightOf(it)}" },
             onValueChange = {
-                val value = ((it.roundToInt() + 50) / 100 * 100).coerceIn(300, 900)
+                val value = lyricWeightOf(it)
                 onChange(module.copy(lyricWeight = value))
                 ModuleBridge.setLyricStyle(context, "weight", value.toFloat())
             },
@@ -969,6 +971,10 @@ private enum class ProviderNotice(
     /** Installed and writing. Apps outside its scope can still miss, which is worth saying. */
     Ready(R.string.lyrics_provider_title_ready, R.string.lyrics_provider_ready, false),
 }
+
+/** A slider position as a font weight: the nearest hundred, within what MiSans VF can draw. */
+private fun lyricWeightOf(position: Float): Int =
+    ((position / 100f).roundToInt() * 100).coerceIn(300, 700)
 
 /**
  * Remembers that the lyric-provider notice has been dismissed.

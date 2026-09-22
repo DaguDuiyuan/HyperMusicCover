@@ -28,7 +28,8 @@ final class LyricStyle {
         else if ("side".equals(key)) side = clamp(value, 0f, 64f);
         else if ("size".equals(key)) size = clamp(value, 18f, 36f);
         else if ("weight".equals(key)) {
-            fontWeight = Math.max(300, Math.min(900, Math.round(value / 100f) * 100));
+            // MiSans VF, the lock screen's font, has a weight axis that ends at 700.
+            fontWeight = Math.max(300, Math.min(700, Math.round(value / 100f) * 100));
         } else return this;
         if (offset == offsetDp && gap == gapDp && side == sideDp
                 && size == sizeSp && fontWeight == weight) return this;

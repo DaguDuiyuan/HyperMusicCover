@@ -20,6 +20,9 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final RectF drawn = new RectF();
     private final Path clip = new Path();
+    /** Per-frame scratch, kept rather than allocated on every draw. */
+    private final int[] tmpLoc = new int[2];
+    private final Rect srcRect = new Rect();
     private final Bitmap art;
     private final boolean cardMode;
     private CoverMorphMotion.Box thumb, cover;
@@ -165,7 +168,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         if (!running || art.isRecycled()) return;
         float density = getResources().getDisplayMetrics().density;
         CoverMorphMotion.Box box = CoverMorphMotion.frame(thumb, cover, motion.value, density);
-        int[] root = new int[2];
+        int[] root = tmpLoc;
         getLocationOnScreen(root);
         drawn.set(box.x - root[0], box.y - root[1],
                 box.x + box.w - root[0], box.y + box.h - root[1]);
@@ -190,7 +193,8 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         float reveal = cardMode ? 0f : p;
         int cropW = Math.round(side + (art.getWidth() - side) * reveal);
         int cropH = Math.round(side + (art.getHeight() - side) * reveal);
-        Rect source = new Rect((art.getWidth() - cropW) / 2, (art.getHeight() - cropH) / 2,
+        Rect source = srcRect;
+        source.set((art.getWidth() - cropW) / 2, (art.getHeight() - cropH) / 2,
                 (art.getWidth() + cropW) / 2, (art.getHeight() + cropH) / 2);
         canvas.drawBitmap(art, source, drawn, paint);
         canvas.restoreToCount(saved);

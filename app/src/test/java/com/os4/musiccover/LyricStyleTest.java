@@ -47,7 +47,7 @@ public class LyricStyleTest {
         assertSame(s, s.with("unknown", 42f));
         assertEquals(36f, s.with("size", 100f).sizeSp, 0f);
         assertEquals(-80f, s.with("offset", -1000f).offsetDp, 0f);
-        assertEquals(900, s.with("weight", 9999f).weight);
+        assertEquals(700, s.with("weight", 9999f).weight);
         assertEquals(500, s.with("weight", 549f).weight);
         assertNull(band(s, Float.NaN, 500f, 25f));
     }
