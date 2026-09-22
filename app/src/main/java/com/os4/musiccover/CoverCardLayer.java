@@ -329,7 +329,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         opacity = 0f;
         exitWithCard = false;
         if (getVisibility() != GONE) setVisibility(GONE);
-        wash.show(false);
+        wash.hideNow();
     }
 
     static void entering() {
@@ -640,13 +640,42 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             setVisibility(GONE);
         }
 
+        /**
+         * In over the doze's own dimming and out over the wallpaper's brightening. Put up and
+         * taken down in one frame it flashed: brighter for a moment going into the AOD, while the
+         * wallpaper had not dimmed yet, and darker for ~100ms coming out, while it was still dim.
+         */
+        private static final long IN_MS = 500L, OUT_MS = 250L;
+        private boolean want;
+        private float from;
+        private long changedAt;
+
+        /** 0..1, how much of the wash is up right now. */
+        private float level() {
+            float t = Math.min(1f, (SystemClock.uptimeMillis() - changedAt)
+                    / (float) (want ? IN_MS : OUT_MS));
+            float e = t * t * (3f - 2f * t);
+            return from + ((want ? 1f : 0f) - from) * e;
+        }
+
         void show(boolean on) {
-            int vis = on ? VISIBLE : GONE;
-            if (getVisibility() != vis) setVisibility(vis);
-            if (on) {
-                fit();
+            if (on != want) {
+                from = getVisibility() == VISIBLE ? level() : 0f;
+                want = on;
+                changedAt = SystemClock.uptimeMillis();
+            }
+            if (on && getVisibility() != VISIBLE) setVisibility(VISIBLE);
+            if (getVisibility() == VISIBLE) {
+                if (on) fit();
                 invalidate();
             }
+        }
+
+        /** Unlocked, or anywhere else the wash has no business: gone at once. */
+        void hideNow() {
+            want = false;
+            from = 0f;
+            if (getVisibility() != GONE) setVisibility(GONE);
         }
 
         /** Scales this view so that its bounds land on the whole display. */
@@ -685,9 +714,18 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         @Override protected void onDraw(Canvas canvas) {
             CoverCardLayer v = sView;
             Prepared p = v == null ? null : v.current;
-            if (p == null || p.aodBackdrop == null || p.aodBackdrop.isRecycled()
-                    || !Main.coverCardBackdropInAod()) return;
-            paint.setAlpha(64);
+            float level = level();
+            boolean moving = SystemClock.uptimeMillis() - changedAt < (want ? IN_MS : OUT_MS);
+            if (!want && !moving) {
+                // Faded all the way out: off the draw list until it is wanted again.
+                post(new Runnable() {
+                    @Override public void run() { if (!want) setVisibility(GONE); }
+                });
+                return;
+            }
+            if (moving) postInvalidateOnAnimation();
+            if (p == null || p.aodBackdrop == null || p.aodBackdrop.isRecycled()) return;
+            paint.setAlpha(Math.round(64f * level));
             bounds.set(0f, 0f, getWidth(), getHeight());
             canvas.drawBitmap(p.aodBackdrop, null, bounds, paint);
         }
