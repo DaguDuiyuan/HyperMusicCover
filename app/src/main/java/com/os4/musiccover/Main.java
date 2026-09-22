@@ -1999,7 +1999,8 @@ public class Main extends XposedModule {
                         // "the card stayed small", where the log is not there to read.
                         MediaController w = sWatched;
                         PlaybackState ps = w == null ? null : w.getPlaybackState();
-                        setResultData("session=" + (ps == null ? "none" : ps.getState())
+                        setResultData("toggles=[" + toggleCost() + "] session="
+                                + (ps == null ? "none" : ps.getState())
                                 + " playing=" + sCoverCardPlaying + " "
                                 + CoverCardLayer.describe());
                     } else if ("lyricstate".equals(op)) {
@@ -4806,6 +4807,13 @@ public class Main extends XposedModule {
 
     /** Prefer the pixels visible in the card; some OEM drawables expose no BitmapDrawable. */
     static Bitmap coverMorphSource() {
+        // The square's own art first: prepared off the main thread already, and the very pixels
+        // the morph lands on. The session fallback below is a binder call carrying the bitmap,
+        // made on the main thread at the moment the animation has to start.
+        // Only while the cover is up: outside it, a track may have changed since the square last
+        // had art, and it would fly the previous album.
+        Bitmap own = sCoverMode ? CoverCardLayer.currentArt() : null;
+        if (own != null) return own;
         Bitmap thumb = cardThumbnail();
         return thumb != null ? thumb : (sAppCtx == null ? null : albumArt(sAppCtx, false));
     }
@@ -5675,7 +5683,9 @@ public class Main extends XposedModule {
 
     /** Keep the shared media card at its real state while the moving copy owns its pixels. */
     static void refreshMediaCardForMorph() {
-        View card = findSysuiView("mi_media_controls");
+        // Called on the morph's frames: the card already held, not a search of the whole tree.
+        View card = sCardGuarded;
+        if (card == null || !card.isAttachedToWindow()) card = findSysuiView("mi_media_controls");
         if (card != null) assertMediaCard(card);
     }
 
@@ -6903,6 +6913,46 @@ public class Main extends XposedModule {
         return sb.toString();
     }
 
+    /** The card's track when the running morph began; a different one is what cancels it. */
+    private static String sMorphKey = "";
+
+    private static void beginMorph(boolean toCover) {
+        long t0 = System.nanoTime();
+        if (!CoverMorphLayer.active()) sMorphKey = sCardKey;
+        CoverMorphLayer.begin(toCover);
+        sMorphBeginNs += System.nanoTime() - t0;
+    }
+
+    /**
+     * For `op cardstate`: main-thread milliseconds of the last few tap toggles, the whole handler
+     * and the morph's own start inside it, newest first - where a hitch at the start comes from.
+     */
+    private static final StringBuilder sToggleCost = new StringBuilder();
+    private static long sMorphBeginNs;
+
+    private static void noteToggleCost(String what, long ns) {
+        sToggleCost.insert(0, what + "=" + (ns / 100000L) / 10f + "ms(morph "
+                + (sMorphBeginNs / 100000L) / 10f + ") ");
+        if (sToggleCost.length() > 400) sToggleCost.setLength(400);
+        sMorphBeginNs = 0L;
+    }
+
+    static String toggleCost() {
+        return sToggleCost.toString();
+    }
+
+    private static void exitFromTap(String why) {
+        long t0 = System.nanoTime();
+        exitFromTapNow(why);
+        noteToggleCost("out", System.nanoTime() - t0);
+    }
+
+    private static void enterFromTap(String why) {
+        long t0 = System.nanoTime();
+        enterFromTapNow(why);
+        noteToggleCost("in", System.nanoTime() - t0);
+    }
+
     /**
      * Back to the plain wallpaper, with the card left standing where it is.
      *
@@ -6912,15 +6962,7 @@ public class Main extends XposedModule {
      * off, and not an unlock and a lock again - it is the last session going away that clears it,
      * and the next thing the user plays then starts from the cover as it always did.
      */
-    /** The card's track when the running morph began; a different one is what cancels it. */
-    private static String sMorphKey = "";
-
-    private static void beginMorph(boolean toCover) {
-        if (!CoverMorphLayer.active()) sMorphKey = sCardKey;
-        CoverMorphLayer.begin(toCover);
-    }
-
-    private static void exitFromTap(String why) {
+    private static void exitFromTapNow(String why) {
         if (CoverMorphRoute.shouldMorph(LockLyrics.wantsAttached()
                 ? CoverMorphRoute.LYRICS : CoverMorphRoute.COVER,
                 CoverMorphRoute.NORMAL)) beginMorph(false);
@@ -6935,7 +6977,7 @@ public class Main extends XposedModule {
      * Back into cover mode, through the normal path rather than by re-pushing whatever was last
      * composed: the track may well have moved on while the cover was off.
      */
-    private static void enterFromTap(String why) {
+    private static void enterFromTapNow(String why) {
         // Read before it is cleared: with it set, the cover was taken away by a tap on this same
         // look, so this tap is that look coming back rather than a new one. See enterCoverMode.
         //

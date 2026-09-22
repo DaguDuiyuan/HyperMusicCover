@@ -357,6 +357,13 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         }
     }
 
+    /** The square's current art, for the morph to fly - null when it has none yet. */
+    static Bitmap currentArt() {
+        CoverCardLayer v = sView;
+        Prepared p = v == null ? null : v.current;
+        return p == null || p.art.isRecycled() ? null : p.art;
+    }
+
     /** For `op cardstate`. */
     static String describe() {
         CoverCardLayer v = sView;
