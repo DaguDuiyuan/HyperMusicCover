@@ -58,6 +58,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         if (old != null && old.running) {
             if (old.cardMode == Main.coverMorphCardMode()) {
                 old.motion.aim(toCover);
+                old.revealAt = 0L;
                 old.startedAt = SystemClock.uptimeMillis();
                 old.invalidate();
                 return true;
@@ -88,19 +89,22 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
 
     static boolean active() { return sView != null && sView.running; }
 
-    /** Progress below which the OEM thumbnail fades back in under a copy that is landing on it. */
-    private static final float THUMB_REVEAL = 0.3f;
+    /** How long the OEM thumbnail takes to fade back in under the copy that has landed on it. */
+    private static final long THUMB_FADE_MS = 120L;
+    /** When the copy first covered the thumbnail on the way back; 0 until it has. */
+    private long revealAt;
 
     /**
-     * The OEM thumbnail's alpha while a morph owns its pixels. Zero on the way out; on the way
-     * back it rises over the last stretch, so its own shadow comes in with it rather than all at
-     * once when this layer goes.
+     * The OEM thumbnail's alpha while a morph owns its pixels. Zero on the way out. On the way
+     * back it fades in, so its own shadow comes in with it rather than all at once when this
+     * layer goes - but only from the moment the copy covers it: started on progress alone it
+     * showed beside a copy that was still larger and elsewhere.
      */
     static float thumbAlpha() {
         CoverMorphLayer v = sView;
         if (v == null || !v.running) return 1f;
-        if (v.motion.target != 0f) return 0f;
-        float r = (THUMB_REVEAL - v.motion.value) / THUMB_REVEAL;
+        if (v.motion.target != 0f || v.revealAt == 0L) return 0f;
+        float r = (SystemClock.uptimeMillis() - v.revealAt) / (float) THUMB_FADE_MS;
         return Math.max(0f, Math.min(1f, r));
     }
     static boolean cardSuppressed() { return active() && sView.cardMode; }
@@ -137,20 +141,34 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
                 : Math.min(1f, Math.max(0f, (1f - motion.value) / 0.18f));
         fullAlpha += (desiredAlpha - fullAlpha) * Math.min(1f, dt * 20f);
         invalidate();
-        // The thumbnail's fade-in is written by the card's own pass; it needs a frame to run in.
-        if (motion.target == 0f && motion.value < THUMB_REVEAL) Main.refreshMediaCardForMorph();
+        if (motion.target == 0f) {
+            if (revealAt == 0L && (motion.atRest() || covers(CoverMorphMotion.frame(thumb, cover,
+                    motion.value, getResources().getDisplayMetrics().density), thumb))) {
+                revealAt = SystemClock.uptimeMillis();
+            }
+            // The fade-in is written by the card's own pass; it needs a frame to run in.
+            if (revealAt != 0L) Main.refreshMediaCardForMorph();
+        }
         ClockCollapse.Phase phase = ClockCollapse.phase();
         boolean clockFlying = motion.target == 1f
                 ? phase == ClockCollapse.Phase.ENTER
                 : phase == ClockCollapse.Phase.EXIT;
-        boolean handoffDone = motion.target == 0f || (artworkReady && cardReady
-                && (cardMode || fullAlpha < 0.01f));
+        // Back at the thumbnail, the layer stays until the thumbnail has fully faded in.
+        boolean handoffDone = motion.target == 0f ? thumbAlpha() >= 1f
+                : artworkReady && cardReady && (cardMode || fullAlpha < 0.01f);
         if (motion.atRest() && handoffDone && (!clockFlying
                 || SystemClock.uptimeMillis() - startedAt > 2200L)) {
             finish();
         } else {
             Choreographer.getInstance().postFrameCallback(this);
         }
+    }
+
+    /** Whether the copy's box hides the thumbnail's, give or take a pixel. */
+    private static boolean covers(CoverMorphMotion.Box copy, CoverMorphMotion.Box thumb) {
+        return copy.x <= thumb.x + 1f && copy.y <= thumb.y + 1f
+                && copy.x + copy.w >= thumb.x + thumb.w - 1f
+                && copy.y + copy.h >= thumb.y + thumb.h - 1f;
     }
 
     @Override protected void onDraw(Canvas canvas) {
