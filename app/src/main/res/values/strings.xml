@@ -91,6 +91,7 @@
     <string name="credits_miuix">这个界面用到的全部组件</string>
     <string name="credits_liquid_glass">液态玻璃的透镜、内阴影和鲜艳度</string>
     <string name="credits_markdown_css">更新日志的排版样式</string>
+    <string name="credits_cialloum">方形封面卡片、小封面与大封面之间的形变动画，以及锁屏歌词的位置、字号和字重设置</string>
     <string name="credits_hyperchanger">解除景深限制、锁屏搭配数量上限、时钟冒号、全局主题下的柔光玻璃</string>
     <string name="credits_hypertweak">隐藏锁屏指纹图案和指纹动画的做法</string>
     <string name="credits_amll">锁屏歌词的动画手感</string>

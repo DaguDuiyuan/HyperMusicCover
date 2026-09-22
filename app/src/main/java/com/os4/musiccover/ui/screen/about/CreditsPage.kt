@@ -66,6 +66,11 @@ fun CreditsPageContent(
 
     val lyricCredits = listOf(
         Credit(
+            "@CialloUM",
+            stringResource(R.string.credits_cialloum),
+            "https://www.coolapk.com/u/37608778",
+        ),
+        Credit(
             "HyperChanger",
             stringResource(R.string.credits_hyperchanger),
             "https://github.com/ColdP/HyperChanger",
