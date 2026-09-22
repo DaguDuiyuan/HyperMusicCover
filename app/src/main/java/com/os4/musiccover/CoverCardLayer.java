@@ -516,7 +516,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     @Override public void doFrame(long nowNs) {
         if (!ticking || !isAttachedToWindow()) { stop(); return; }
         float dt = lastFrame == 0L ? 1f / 60f
-                : Math.min(0.02f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
+                : Math.min(0.05f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
         lastFrame = nowNs;
         ClockCollapse.Phase phase = ClockCollapse.phase();
         boolean inAod = Main.coverCardInAod();
@@ -600,29 +600,52 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
      * A soft drop shadow under the square, shared with CoverMorphLayer so the hand-over does not
      * change it. Blurred and pulled in from the edges: an unblurred copy offset downwards reads
      * as a dark slab along the bottom edge rather than as a shadow.
+     *
+     * Drawn from one small pre-blurred tile, scaled to the square. It was a BlurMaskFilter on the
+     * live rect, and a rect that changes size every frame - the morph, the play/pause spring - is
+     * a fresh GPU blur every frame: the frames at the start of a tap toggle measured 15-18ms of
+     * GPU against an 8.3ms budget, on top of the wallpaper's own crossfade. Scaled, the shadow
+     * keeps its proportions to the square: at a 300dp square it is the 16dp blur, 6dp inset and
+     * 8dp drop it was drawn with before.
      */
     static void drawShadow(Canvas canvas, RectF box, float radius, float density,
                            float strength, Paint paint) {
-        if (strength <= 0f) return;
-        float blur = 16f * density;
-        float inset = 6f * density;
-        float dy = 8f * density;
-        if (sShadowBlur == null || sShadowBlurPx != blur) {
-            sShadowBlur = new BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL);
-            sShadowBlurPx = blur;
-        }
+        if (strength <= 0f || box.width() <= 0f) return;
+        Bitmap tile = shadowTile();
+        float k = box.width() / SHADOW_UNIT;
+        float pad = SHADOW_PAD * k, dy = SHADOW_DROP * box.width();
+        sShadowDst.set(box.left - pad, box.top - pad + dy, box.right + pad, box.bottom + pad + dy);
         paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xFF000000);
         paint.setAlpha(Math.round(strength * 90f));
-        paint.setMaskFilter(sShadowBlur);
-        canvas.drawRoundRect(box.left + inset, box.top + inset + dy,
-                box.right - inset, box.bottom - inset + dy, radius, radius, paint);
-        paint.setMaskFilter(null);
+        canvas.drawBitmap(tile, null, sShadowDst, paint);
     }
 
-    private static BlurMaskFilter sShadowBlur;
-    private static float sShadowBlurPx;
+    /** The tile's square, in its own pixels; the ratios below are the old dp values over 300dp. */
+    private static final float SHADOW_UNIT = 200f;
+    private static final float SHADOW_BLUR = SHADOW_UNIT * 16f / 300f;
+    private static final float SHADOW_INSET = SHADOW_UNIT * 6f / 300f;
+    private static final float SHADOW_RADIUS = SHADOW_UNIT * 20f / 300f;
+    private static final float SHADOW_DROP = 8f / 300f;
+    /** Room round the square for the blur to fall off in. */
+    private static final float SHADOW_PAD = SHADOW_BLUR * 2f;
+    private static Bitmap sShadowTile;
+    private static final RectF sShadowDst = new RectF();
+
+    private static Bitmap shadowTile() {
+        Bitmap t = sShadowTile;
+        if (t != null && !t.isRecycled()) return t;
+        int side = Math.round(SHADOW_UNIT + 2f * SHADOW_PAD);
+        t = Bitmap.createBitmap(side, side, Bitmap.Config.ALPHA_8);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(0xFF000000);
+        p.setMaskFilter(new BlurMaskFilter(SHADOW_BLUR, BlurMaskFilter.Blur.NORMAL));
+        float lo = SHADOW_PAD + SHADOW_INSET, hi = SHADOW_PAD + SHADOW_UNIT - SHADOW_INSET;
+        new Canvas(t).drawRoundRect(lo, lo, hi, hi, SHADOW_RADIUS, SHADOW_RADIUS, p);
+        sShadowTile = t;
+        return t;
+    }
 
     /**
      * The full-screen AOD's faint colour wash, as a view of its own beside the square.

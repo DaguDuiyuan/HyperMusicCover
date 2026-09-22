@@ -153,12 +153,10 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
             finish();
             return;
         }
-        // At most 20ms a frame. A tap into or out of cover mode costs its first frame 25-35ms
-        // (measured; a two-finger switch, which leaves cover mode alone, does not), and a spring
-        // stepped by the whole gap leapt the copy forward in one frame. Held to 20ms, it pauses
-        // for that frame instead; at 90-120Hz a real frame is 8-11ms and is never clipped.
+        // Stepped by the real gap, up to 50ms. Held to 20ms to hide a slow frame, the copy
+        // visibly stopped for it instead, which read worse than the catch-up.
         float dt = lastFrame == 0L ? 1f / 120f
-                : Math.min(0.02f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
+                : Math.min(0.05f, Math.max(0f, (nowNs - lastFrame) / 1e9f));
         lastFrame = nowNs;
         motion.step(dt, Main.sClockResponse);
         CoverMorphMotion.Box liveThumb = Main.coverMorphThumbnail();
