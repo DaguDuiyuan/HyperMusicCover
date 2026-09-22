@@ -1991,6 +1991,14 @@ public class Main extends XposedModule {
                                 + " last=" + sTwoWhy
                                 + " lyrics=" + LockLyrics.sEnabled
                                 + " tap=" + (LockLyrics.sTapHidden ? "hidden" : "shown"));
+                    } else if ("cardstate".equals(op)) {
+                        // The square card's playback scale, next to what the session says - for
+                        // "the card stayed small", where the log is not there to read.
+                        MediaController w = sWatched;
+                        PlaybackState ps = w == null ? null : w.getPlaybackState();
+                        setResultData("session=" + (ps == null ? "none" : ps.getState())
+                                + " playing=" + sCoverCardPlaying + " "
+                                + CoverCardLayer.describe());
                     } else if ("lyricstate".equals(op)) {
                         String st = LockLyrics.describe();
                         Xp.log(TAG + "lyrics: " + st);
@@ -7439,6 +7447,10 @@ public class Main extends XposedModule {
                 sMediaCb = new MediaController.Callback() {
                     @Override
                     public void onMetadataChanged(MediaMetadata md) {
+                        // Every track change re-reads the state rather than trusting that the
+                        // last callback of a skip was the one that says where it ended up.
+                        MediaController w = sWatched;
+                        if (w != null) updateCoverCardPlayback(w.getPlaybackState());
                         if (sCoverWanted) attachCover();
                         onMediaUpdate();
                     }
@@ -7469,7 +7481,17 @@ public class Main extends XposedModule {
     }
 
     private static void updateCoverCardPlayback(PlaybackState state) {
-        boolean playing = state != null && state.getState() == PlaybackState.STATE_PLAYING;
+        int s = state == null ? PlaybackState.STATE_NONE : state.getState();
+        // A skip passes through SKIPPING/BUFFERING/CONNECTING on its way to the next track. Those
+        // are not a pause: taking them as one shrank the card on every skip, and a fast run of
+        // skips could end on one of them and leave it small while the music played.
+        if (s == PlaybackState.STATE_BUFFERING || s == PlaybackState.STATE_CONNECTING
+                || s == PlaybackState.STATE_SKIPPING_TO_NEXT
+                || s == PlaybackState.STATE_SKIPPING_TO_PREVIOUS
+                || s == PlaybackState.STATE_SKIPPING_TO_QUEUE_ITEM
+                || s == PlaybackState.STATE_REWINDING
+                || s == PlaybackState.STATE_FAST_FORWARDING) return;
+        boolean playing = s == PlaybackState.STATE_PLAYING;
         if (sCoverCardPlaying == playing) return;
         sCoverCardPlaying = playing;
         CoverCardLayer.playback(playing);

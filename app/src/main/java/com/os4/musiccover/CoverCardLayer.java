@@ -278,6 +278,15 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         }
     }
 
+    /** For `op cardstate`. */
+    static String describe() {
+        CoverCardLayer v = sView;
+        if (v == null) return "view=none";
+        return "view.playing=" + v.playing + " scale=" + v.scale.value
+                + " ticking=" + v.ticking + " opacity=" + v.opacity
+                + " attached=" + v.isAttachedToWindow();
+    }
+
     static float renderedScale(ViewGroup layer) {
         CoverCardLayer v = sView;
         return v != null && v.getParent() == layer ? v.scale.value
