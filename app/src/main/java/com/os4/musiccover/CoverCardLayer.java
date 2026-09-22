@@ -2,6 +2,7 @@ package com.os4.musiccover;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -410,11 +411,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         float scaled = actual.w;
         square.set(actual.x, actual.y, actual.x + actual.w, actual.y + actual.h);
         float radius = Math.min(20f * density, scaled * 0.10f);
-        paint.setShader(null);
-        paint.setColor(0x44000000);
-        paint.setAlpha(Math.round(opacity * 70f));
-        canvas.drawRoundRect(square.left, square.top + 4f * density,
-                square.right, square.bottom + 4f * density, radius, radius, paint);
+        drawShadow(canvas, square, radius, density, opacity, paint);
         int save = canvas.save();
         Path clip = new Path();
         clip.addRoundRect(square, radius, radius, Path.Direction.CW);
@@ -429,6 +426,34 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         canvas.drawRoundRect(square, radius, radius, paint);
         paint.setStyle(Paint.Style.FILL);
     }
+
+    /**
+     * A soft drop shadow under the square, shared with CoverMorphLayer so the hand-over does not
+     * change it. Blurred and pulled in from the edges: an unblurred copy offset downwards reads
+     * as a dark slab along the bottom edge rather than as a shadow.
+     */
+    static void drawShadow(Canvas canvas, RectF box, float radius, float density,
+                           float strength, Paint paint) {
+        if (strength <= 0f) return;
+        float blur = 16f * density;
+        float inset = 6f * density;
+        float dy = 8f * density;
+        if (sShadowBlur == null || sShadowBlurPx != blur) {
+            sShadowBlur = new BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL);
+            sShadowBlurPx = blur;
+        }
+        paint.setShader(null);
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(0xFF000000);
+        paint.setAlpha(Math.round(strength * 90f));
+        paint.setMaskFilter(sShadowBlur);
+        canvas.drawRoundRect(box.left + inset, box.top + inset + dy,
+                box.right - inset, box.bottom - inset + dy, radius, radius, paint);
+        paint.setMaskFilter(null);
+    }
+
+    private static BlurMaskFilter sShadowBlur;
+    private static float sShadowBlurPx;
 
     private float fadeFraction() {
         if (previous == null) return 1f;

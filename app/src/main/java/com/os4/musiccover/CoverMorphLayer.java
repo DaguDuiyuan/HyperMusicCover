@@ -142,14 +142,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         float endRadius = cardMode ? Math.min(20f * density, cover.w * 0.10f) : 0f;
         float radius = startRadius + (endRadius - startRadius) * p;
         float decoration = cardMode ? CoverMorphMotion.cardDecoration(motion.value) : 0f;
-        if (decoration > 0f) {
-            paint.setShader(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0x44000000);
-            paint.setAlpha(Math.round(70f * decoration));
-            canvas.drawRoundRect(drawn.left, drawn.top + 4f * density,
-                    drawn.right, drawn.bottom + 4f * density, radius, radius, paint);
-        }
+        CoverCardLayer.drawShadow(canvas, drawn, radius, density, decoration, paint);
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(0xFFFFFFFF);
         // The full wallpaper already contains the final sharp band. Hand its pixels over near
