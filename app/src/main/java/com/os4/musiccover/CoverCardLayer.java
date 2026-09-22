@@ -55,8 +55,11 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private int lastWidth = -1, lastHeight = -1, lastTop = Integer.MIN_VALUE;
     private float lastClock = Float.NaN, lastMedia = Float.NaN;
 
+    private final Wash wash;
+
     private CoverCardLayer(Context context) {
         super(context);
+        wash = new Wash(context);
         setClickable(false);
         setFocusable(false);
     }
@@ -78,6 +81,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                 if (v.getParent() instanceof ViewGroup) {
                     ((ViewGroup) v.getParent()).removeView(v);
                 }
+                if (v.wash.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) v.wash.getParent()).removeView(v.wash);
+                }
                 if (v.previous != null && v.previous != sPending) v.previous.recycle();
                 if (v.current != null && v.current != sPending) v.current.recycle();
             }
@@ -91,6 +97,14 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         v.bringToFront();
+        if (v.wash.getParent() != layer) {
+            if (v.wash.getParent() instanceof ViewGroup) {
+                ((ViewGroup) v.wash.getParent()).removeView(v.wash);
+            }
+            // Just under the square, so the square still draws over the wash.
+            layer.addView(v.wash, layer.indexOfChild(v), new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
         v.style = sStyle;
         v.playing = sPlayingState;
         v.watchGeometry(layer);
@@ -117,6 +131,9 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                     lastLockEligible = true;
                     start();
                 }
+                // Every frame of the window while the wash is up: the doze zoom it has to undo
+                // animates, and nothing else of ours is drawing frames through it.
+                if (wash.getVisibility() == VISIBLE) wash.fit();
                 int[] loc = new int[2];
                 getLocationOnScreen(loc);
                 float clock = ClockCollapse.contentBottomOnScreen();
@@ -251,6 +268,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         opacity = 0f;
         exitWithCard = false;
         if (getVisibility() != GONE) setVisibility(GONE);
+        wash.show(false);
     }
 
     static void entering() {
@@ -389,7 +407,8 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         }
         boolean backdrop = Main.coverCardBackdropInAod() && current != null
                 && current.aodBackdrop != null;
-        int visibility = opacity > 0f || target > 0f || backdrop ? VISIBLE : GONE;
+        wash.show(backdrop);
+        int visibility = opacity > 0f || target > 0f ? VISIBLE : GONE;
         if (getVisibility() != visibility) setVisibility(visibility);
         if (visibility == VISIBLE) invalidate();
         boolean settling = Math.abs(target - opacity) > 0.001f
@@ -410,12 +429,6 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             return;
         }
         if (current == null) return;
-        if (Main.coverCardBackdropInAod() && current.aodBackdrop != null) {
-            paint.setShader(null);
-            paint.setColor(0xFFFFFFFF);
-            paint.setAlpha(64);
-            canvas.drawBitmap(current.aodBackdrop, null, screenInView(), paint);
-        }
         // A doze frame may draw before the queued animation frame clears a stale lock-screen
         // opacity. The lyric page must never show the square underneath it in the full AOD.
         if (opacity <= 0f || CoverMorphLayer.cardSuppressed()
@@ -477,25 +490,78 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private static float sShadowBlurPx;
 
     /**
-     * The whole display, in this view's coordinates. The doze scales keyguard_root_view to 0.95
-     * (see Main's keyguard zoom notes) and this layer is inside it, so a wash drawn at the view's
-     * own bounds came out 5% short and framed by the dark wallpaper. The zoom itself is right
-     * and stays; only this full-screen wash is drawn back out past it.
+     * The full-screen AOD's faint colour wash, as a view of its own beside the square.
+     *
+     * The doze scales keyguard_root_view to 0.95 (`op cardstate` lists the chain), and
+     * keyguard_background_layer clips its children to their bounds, so a wash drawn by the card
+     * layer came out 5% short and framed by the dark wallpaper - drawing past the bounds is
+     * clipped away. A child's clip moves with the child's own transform, so this view is scaled
+     * back out by the inverse of the zoom instead. The zoom itself is right and stays: the square
+     * rides it with the rest of the lock screen, which is why the wash is not part of it.
      */
-    private RectF screenInView() {
-        float sx = 1f, sy = 1f;
-        for (Object p = this; p instanceof View; p = ((View) p).getParent()) {
-            sx *= ((View) p).getScaleX();
-            sy *= ((View) p).getScaleY();
+    private static final class Wash extends View {
+        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final int[] loc = new int[2];
+
+        Wash(Context context) {
+            super(context);
+            setClickable(false);
+            setFocusable(false);
+            setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+            setVisibility(GONE);
         }
-        int sw = Main.screenWidth(), sh = Main.screenHeight();
-        if (sw <= 0 || sh <= 0 || !(sx > 0f) || !(sy > 0f)) {
-            return new RectF(0f, 0f, getWidth(), getHeight());
+
+        void show(boolean on) {
+            int vis = on ? VISIBLE : GONE;
+            if (getVisibility() != vis) setVisibility(vis);
+            if (on) {
+                fit();
+                invalidate();
+            }
         }
-        int[] loc = new int[2];
-        getLocationOnScreen(loc);
-        float left = -loc[0] / sx, top = -loc[1] / sy;
-        return new RectF(left, top, left + sw / sx, top + sh / sy);
+
+        /** Scales this view so that its bounds land on the whole display. */
+        void fit() {
+            if (!(getParent() instanceof View) || getWidth() <= 0 || getHeight() <= 0) return;
+            View parent = (View) getParent();
+            float sx = 1f, sy = 1f;
+            for (Object p = parent; p instanceof View; p = ((View) p).getParent()) {
+                sx *= ((View) p).getScaleX();
+                sy *= ((View) p).getScaleY();
+            }
+            int sw = Main.screenWidth(), sh = Main.screenHeight();
+            if (sw <= 0 || sh <= 0 || !(sx > 0f) || !(sy > 0f)) return;
+            parent.getLocationOnScreen(loc);
+            fitAxis(true, loc[0], sx, sw / (getWidth() * sx));
+            fitAxis(false, loc[1], sy, sh / (getHeight() * sy));
+        }
+
+        /**
+         * On screen, x in this view lands at origin + s * (pivot + (x - pivot) * k). Solving for
+         * x = 0 landing on 0 gives the pivot; k is what makes the far edge land on the far edge.
+         */
+        private void fitAxis(boolean x, float origin, float s, float k) {
+            float pivot = 0f;
+            if (Math.abs(1f - k) > 1e-4f) pivot = -origin / (s * (1f - k));
+            else k = 1f;
+            if (x) {
+                if (getScaleX() != k) setScaleX(k);
+                if (getPivotX() != pivot) setPivotX(pivot);
+            } else {
+                if (getScaleY() != k) setScaleY(k);
+                if (getPivotY() != pivot) setPivotY(pivot);
+            }
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            CoverCardLayer v = sView;
+            Prepared p = v == null ? null : v.current;
+            if (p == null || p.aodBackdrop == null || p.aodBackdrop.isRecycled()
+                    || !Main.coverCardBackdropInAod()) return;
+            paint.setAlpha(64);
+            canvas.drawBitmap(p.aodBackdrop, null, new RectF(0f, 0f, getWidth(), getHeight()),
+                    paint);
+        }
     }
 
     /**
