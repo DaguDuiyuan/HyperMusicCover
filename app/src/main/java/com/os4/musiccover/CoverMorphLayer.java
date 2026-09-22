@@ -143,7 +143,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         invalidate();
         if (motion.target == 0f) {
             if (revealAt == 0L && (motion.atRest() || covers(CoverMorphMotion.frame(thumb, cover,
-                    motion.value, getResources().getDisplayMetrics().density), thumb))) {
+                    shownProgress(), getResources().getDisplayMetrics().density), thumb))) {
                 revealAt = SystemClock.uptimeMillis();
             }
             // The fade-in is written by the card's own pass; it needs a frame to run in.
@@ -164,6 +164,15 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
         }
     }
 
+    /**
+     * The progress the copy is drawn at. Going out, the spring's overshoot is the landing bounce.
+     * Coming back it is not kept: past zero the copy shrank below the thumbnail, which by then is
+     * fading in underneath, and the thumbnail's edge showed round it as a ring.
+     */
+    private float shownProgress() {
+        return motion.target == 0f ? Math.max(0f, motion.value) : motion.value;
+    }
+
     /** Whether the copy's box hides the thumbnail's, give or take a pixel. */
     private static boolean covers(CoverMorphMotion.Box copy, CoverMorphMotion.Box thumb) {
         return copy.x <= thumb.x + 1f && copy.y <= thumb.y + 1f
@@ -174,7 +183,7 @@ final class CoverMorphLayer extends View implements Choreographer.FrameCallback 
     @Override protected void onDraw(Canvas canvas) {
         if (!running || art.isRecycled()) return;
         float density = getResources().getDisplayMetrics().density;
-        CoverMorphMotion.Box box = CoverMorphMotion.frame(thumb, cover, motion.value, density);
+        CoverMorphMotion.Box box = CoverMorphMotion.frame(thumb, cover, shownProgress(), density);
         int[] root = new int[2];
         getLocationOnScreen(root);
         drawn.set(box.x - root[0], box.y - root[1],

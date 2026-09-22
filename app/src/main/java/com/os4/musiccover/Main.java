@@ -5561,9 +5561,12 @@ public class Main extends XposedModule {
 
     static boolean coverCardVisible() {
         View c = sContainer;
+        // Not under the PIN pad: the OEM fades the clock and the notifications for it, but this
+        // layer is the keyguard's background and stays, so the square showed through the pad -
+        // most plainly when a tapped notification is what brought the pad up.
         return (sCoverMode || ClockCollapse.phase() == ClockCollapse.Phase.EXIT)
                 && keyguardShowing() && c != null && c.isShown()
-                && (sScreenOn || coverCardInAod());
+                && (sScreenOn || coverCardInAod()) && !bouncerShown();
     }
 
     static boolean coverCardInAod() {
