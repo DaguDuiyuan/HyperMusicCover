@@ -99,7 +99,8 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             layer.addView(v, new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
-        v.bringToFront();
+        // Called on every entry; bringToFront lays the layer out again, so only when needed.
+        if (layer.getChildAt(layer.getChildCount() - 1) != v) v.bringToFront();
         // Beside keyguard_root_view rather than inside it: the doze zooms that view to 0.95 and
         // its bounds clip after the zoom, so nothing under it reaches the screen edge - a
         // counter-scaled wash in the layer was measured still cut to 95%. Just below it keeps
