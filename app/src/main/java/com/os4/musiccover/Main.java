@@ -6739,6 +6739,26 @@ public class Main extends XposedModule {
         return b != null && b.isShown();
     }
 
+    private static View sBouncerView;
+    private static long sBouncerLookedAt;
+
+    /**
+     * bouncerUp() for a caller that asks on every frame: the view is kept rather than looked up
+     * through the whole tree each time, and looked up again only once the keyguard is rebuilt -
+     * and on a build without it, at most once a second, since the miss walks the whole tree.
+     */
+    static boolean bouncerShown() {
+        View b = sBouncerView;
+        if (b == null || !b.isAttachedToWindow()) {
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - sBouncerLookedAt < 1000L) return false;
+            sBouncerLookedAt = now;
+            b = findSysuiView("keyguard_bouncer_container");
+            sBouncerView = b;
+        }
+        return b != null && b.isShown();
+    }
+
     /**
      * Whether the control centre is pulled down over the lock screen.
      *

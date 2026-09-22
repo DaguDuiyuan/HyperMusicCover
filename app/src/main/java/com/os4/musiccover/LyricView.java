@@ -443,6 +443,7 @@ final class LyricView extends View {
         lastStep = now;
 
         boolean changed = followAodDim();
+        changed |= followBouncer(dt);
         int why = 0;
         // Not before the first layout: a width of zero would wrap every line a character a row.
         // Leaving, the lines are frozen like the band below: switching the lyrics off empties
@@ -793,6 +794,33 @@ final class LyricView extends View {
         return true;
     }
 
+    /**
+     * How far the bouncer's blur has come over the lyrics, 0..1.
+     *
+     * The OEM blurs the lock screen under the PIN pad, but the lyrics live in
+     * keyguard_foreground_layer and are not among what it blurs, and the clock container they
+     * take their alpha from stays shown with the pad up (see Main.bouncerShown) - so they stood
+     * sharp over a blurred screen. This blurs them itself, eased in and out with the pad.
+     */
+    private float bouncerP;
+    private static final float BOUNCER_BLUR_DP = 24f;
+    /** Time constant of the ease, in seconds - about the pad's own slide. */
+    private static final float BOUNCER_TAU = 0.08f;
+
+    /** @return whether the blur moved, so the pad coming up keeps this view asking for frames */
+    private boolean followBouncer(float dt) {
+        float want = Main.bouncerShown() ? 1f : 0f;
+        if (bouncerP == want) return false;
+        // The first step of a frame has no dt; it still has to start moving.
+        float k = dt <= 0f ? 0.25f : (float) (1.0 - Math.exp(-dt / BOUNCER_TAU));
+        bouncerP += (want - bouncerP) * k;
+        if (Math.abs(want - bouncerP) < 0.01f) bouncerP = want;
+        float r = bouncerP * BOUNCER_BLUR_DP * density;
+        setRenderEffect(r < 0.5f ? null : android.graphics.RenderEffect.createBlurEffect(
+                r, r, Shader.TileMode.DECAL));
+        return true;
+    }
+
     private boolean needsFrames() {
         if (!isAttachedToWindow()) return false;
         if (show != showTarget()) return true;
@@ -803,6 +831,7 @@ final class LyricView extends View {
         // dimTarget() is 1 outside the AOD and the frame that wakes the keyguard may change
         // nothing else.
         if (getTransitionAlpha() != dimTarget()) return true;
+        if (bouncerP != (Main.bouncerShown() ? 1f : 0f)) return true;
         // The block sliding to a new centre is a movement like any other, and the slowest one
         // here: without this the loop would stop the moment the springs settled and leave the
         // correction half way.
