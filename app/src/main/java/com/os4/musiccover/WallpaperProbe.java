@@ -2224,6 +2224,27 @@ public class WallpaperProbe {
         else if (fade && from != null && to != null) {
             startFade(from, to, null, trackChange ? sTrackFadeMs : sFadeMs);
         } else if (reload) reloadTexture();
+        tellArtShown();
+    }
+
+    /**
+     * The new cover has started onto the screen. SystemUI's square card holds its own swap for
+     * this: it has its art the moment the track changes, while this side still has the broadcast,
+     * the composition and the upload in front of it - measured 70-160ms - so the card used to
+     * turn over visibly ahead of the blurred background it sits on.
+     */
+    private static void tellArtShown() {
+        Context c = sCtx;
+        if (c == null) return;
+        try {
+            Intent out = new Intent("com.os4.musiccover.PROBE");
+            out.setPackage("com.android.systemui");
+            out.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+            out.putExtra("op", "wpart");
+            c.sendBroadcast(out);
+        } catch (Throwable t) {
+            Xp.log(TAG + "wpart failed: " + t);
+        }
     }
 
     /** Where this process keeps the last source, to compose again after its own restart. */

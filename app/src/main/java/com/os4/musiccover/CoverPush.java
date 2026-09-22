@@ -287,6 +287,9 @@ final class CoverPush {
                     if (Main.sCoverCardStyle.mode == CoverCardStyle.CARD) {
                         CoverCardLayer.attach(layer);
                         CoverCardLayer.style(Main.sCoverCardStyle);
+                        // The backdrop is this view here, not the wallpaper process, so nothing
+                        // over there will say it is up: this line is.
+                        CoverCardLayer.releaseHeld();
                     }
                     Bitmap old = Main.sCoverBitmap;
                     Main.sCoverBitmap = full;

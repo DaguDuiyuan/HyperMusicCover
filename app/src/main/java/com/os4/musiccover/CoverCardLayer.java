@@ -216,7 +216,13 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
                     // would throw inside SystemUI.
                     if (old != null && old != sPending && (v == null
                             || (old != v.current && old != v.previous))) old.recycle();
-                    if (v != null) v.adoptPending();
+                    if (v == null) return;
+                    // The first art has nothing to keep pace with. A swap waits for the
+                    // wallpaper to start its own - see releaseHeld() - with a ceiling in case
+                    // that word never comes.
+                    Main.main().removeCallbacks(ADOPT_HELD);
+                    if (v.current == null) v.adoptPending();
+                    else Main.main().postDelayed(ADOPT_HELD, HOLD_MAX_MS);
                 }
             });
         } catch (Throwable t) {
@@ -226,6 +232,29 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             if (art != null) art.recycle();
             if (aodBackdrop != null) aodBackdrop.recycle();
         }
+    }
+
+    /** Longer than the 70-160ms the wallpaper was measured behind by, short of feeling stuck. */
+    private static final long HOLD_MAX_MS = 400L;
+
+    private static final Runnable ADOPT_HELD = new Runnable() {
+        @Override public void run() {
+            CoverCardLayer v = sView;
+            if (v != null) v.adoptPending();
+        }
+    };
+
+    /**
+     * The blurred background under the square has started changing - the wallpaper process
+     * says so (op wpart), or the video path put it up itself - so the square turns over with it.
+     */
+    static void releaseHeld() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Main.main().post(new Runnable() { @Override public void run() { releaseHeld(); } });
+            return;
+        }
+        Main.main().removeCallbacks(ADOPT_HELD);
+        ADOPT_HELD.run();
     }
 
     private static boolean layerVisible() {
@@ -313,6 +342,16 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
             chain.append(' ').append(id).append("[s=").append(g.getScaleX())
                     .append(g.getClipChildren() ? ",clip" : "").append(']');
         }
+        Wash w = v.wash;
+        int[] at = new int[2];
+        w.getLocationOnScreen(at);
+        chain.append(" wash[vis=").append(w.getVisibility() == VISIBLE)
+                .append(' ').append(w.getWidth()).append('x').append(w.getHeight())
+                .append(" s=").append(w.getScaleX()).append('/').append(w.getScaleY())
+                .append(" pivot=").append(w.getPivotX()).append(',').append(w.getPivotY())
+                .append(" at=").append(at[0]).append(',').append(at[1])
+                .append(" screen=").append(Main.screenWidth()).append('x')
+                .append(Main.screenHeight()).append(']');
         return "view.playing=" + v.playing + " scale=" + v.scale.value
                 + " ticking=" + v.ticking + " opacity=" + v.opacity
                 + " attached=" + v.isAttachedToWindow() + " chain=" + chain;

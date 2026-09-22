@@ -1991,6 +1991,9 @@ public class Main extends XposedModule {
                                 + " last=" + sTwoWhy
                                 + " lyrics=" + LockLyrics.sEnabled
                                 + " tap=" + (LockLyrics.sTapHidden ? "hidden" : "shown"));
+                    } else if ("wpart".equals(op)) {
+                        // The wallpaper has begun showing the new cover; see CoverCardLayer.
+                        CoverCardLayer.releaseHeld();
                     } else if ("cardstate".equals(op)) {
                         // The square card's playback scale, next to what the session says - for
                         // "the card stayed small", where the log is not there to read.
