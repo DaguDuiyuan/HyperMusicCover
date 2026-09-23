@@ -99,15 +99,22 @@ object LyricParse {
     @JvmStatic
     fun parse(body: String): List<LyricLine> {
         val lyrics = AutoParser().parse(body)
-        val out = ArrayList<LyricLine>(lyrics.lines.size)
-        for (line in lyrics.lines) {
+        val src = lyrics.lines
+        val out = ArrayList<LyricLine>(src.size)
+        for (i in src.indices) {
+            val line = src[i]
+            // Where the tail of this line may run to when the file left it without an end of its
+            // own: the arrival of the line after it. Read off the list and not by looking up a
+            // time, because the parsers hand the lines over in the order they are sung. The last
+            // line of a song has nothing after it, and keeps whatever the file gave it.
+            val nextStart = src.getOrNull(i + 1)?.start ?: line.end
             when (line) {
                 // Background vocals overlap the main line in time, so they are not lines of their
                 // own - the renderer finds the singing line by start time, and one would steal
                 // the focus for the length of an echo. They hang under the main line they belong
                 // to (the last one started by then), and stretch it if they outlast it.
                 is KaraokeLine.AccompanimentKaraokeLine -> {
-                    val b = karaoke(line) ?: continue
+                    val b = karaoke(line, nextStart) ?: continue
                     val owner = out.lastOrNull { it.start <= b.start } ?: continue
                     if (owner.bg == null) {
                         owner.bg = b
@@ -115,7 +122,7 @@ object LyricParse {
                     }
                 }
                 is KaraokeLine -> {
-                    val main = karaoke(line)
+                    val main = karaoke(line, nextStart)
                     if (main != null) {
                         out.add(main)
                         // Where the accompaniment actually arrives. The branch above is written
@@ -126,7 +133,7 @@ object LyricParse {
                         // business, and a version that goes back to separate lines still works.
                         val acc = (line as? KaraokeLine.MainKaraokeLine)
                             ?.accompanimentLines?.firstOrNull()
-                        val b = acc?.let { karaoke(it) }
+                        val b = acc?.let { karaoke(it, nextStart) }
                         if (b != null) {
                             main.bg = b
                             if (b.end > main.end) main.end = b.end
@@ -146,7 +153,7 @@ object LyricParse {
         return speakers(out)
     }
 
-    private fun karaoke(line: KaraokeLine): LyricLine? {
+    private fun karaoke(line: KaraokeLine, nextStart: Int): LyricLine? {
         val syl = line.syllables
         if (syl.isEmpty()) return null
         val text = StringBuilder()
@@ -166,7 +173,7 @@ object LyricParse {
         while (n > 0 && text[n - 1].isWhitespace()) n--
         if (n == 0) return null
         for (k in chars.indices) if (chars[k] > n) chars[k] = n
-        closeUntimedTail(starts, ends, line.end)
+        closeUntimedTail(starts, ends, line.end, nextStart)
         return LyricLine(text.substring(0, n), line.translation, line.start, line.end,
             line.alignment == KaraokeAlignment.End, starts, ends, chars)
     }
@@ -185,11 +192,17 @@ object LyricParse {
      * sung. The fill then crosses the last word in a single frame instead of sweeping it, and the
      * word is never the second long that the glow asks for.
      *
-     * A word left without a span runs to the end of the line. Words that share a start - which is
-     * what a wholly untimed tail looks like - divide that stretch between them, rather than
-     * crossing together, so the fill still moves through them one at a time.
+     * A word left without a span runs to the end of the line, and to the arrival of the line after
+     * it when the file has no end to offer - which is the case for every file that times a line by
+     * its words and nothing else. Not every such wait is a note, though: a singer will hold a word
+     * through the last bar of a chorus but nobody holds one across an interlude, and the renderer
+     * answers the second kind with its interlude dots (`LyricView.LULL_MS`, the same four seconds),
+     * so past that the word keeps the nominal span and leaves the rest of the wait to them. Words
+     * that share a start - which is what a wholly untimed tail looks like - divide the stretch
+     * between them, rather than crossing together, so the fill still moves through them one at a
+     * time.
      */
-    internal fun closeUntimedTail(starts: IntArray, ends: IntArray, lineEnd: Int) {
+    internal fun closeUntimedTail(starts: IntArray, ends: IntArray, lineEnd: Int, nextStart: Int) {
         var k = 0
         while (k < starts.size) {
             if (ends[k] > starts[k]) {
@@ -210,8 +223,12 @@ object LyricParse {
                 }
             }
             // A line whose own end is no later than its last word - which is what a file that
-            // times lines by their words alone reports - leaves nothing to go on.
-            if (to <= from) to = from + NOMINAL_WORD_MS * (last - k + 1)
+            // times lines by their words alone reports - leaves nothing to go on but the next
+            // line's arrival.
+            if (to <= from) {
+                to = if (nextStart - from in 1..MAX_HELD_MS) nextStart
+                else from + NOMINAL_WORD_MS * (last - k + 1)
+            }
             val count = last - k + 1
             for (m in k..last) ends[m] = from + (to - from) * (m - k + 1) / count
             k = last + 1
@@ -224,6 +241,13 @@ object LyricParse {
      * rather than snaps.
      */
     private const val NOMINAL_WORD_MS = 300
+
+    /**
+     * The longest a last word can be taken to still be sounding. A wait longer than this is not a
+     * note held across it but an interlude, and the renderer is about to draw its dots through
+     * that space anyway (the same four seconds; see LyricView.LULL_MS).
+     */
+    private const val MAX_HELD_MS = 4000
 
     /** "筷：" or "Jay: " at the head of a line - a name, then a full- or half-width colon. */
     private val LABEL = Regex("^([^\\s\\d:：]{1,6})\\s*[:：]\\s*")
