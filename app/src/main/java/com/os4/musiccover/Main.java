@@ -5576,7 +5576,17 @@ public class Main extends XposedModule {
         // most plainly when a tapped notification is what brought the pad up.
         return (sCoverMode || ClockCollapse.phase() == ClockCollapse.Phase.EXIT)
                 && keyguardShowing() && c != null && c.isShown()
-                && (sScreenOn || coverCardInAod()) && !bouncerShown();
+                && (sScreenOn || coverCardInAod() || coverCardFallingAsleep()) && !bouncerShown();
+    }
+
+    /**
+     * The clock growing into the doze's big clock. The screen is already off, and without this
+     * the layer was taken GONE on the first frame of the fall, before the square could go under
+     * the growing digits - CoverCardLayer ties it to them.
+     */
+    private static boolean coverCardFallingAsleep() {
+        return sCoverMode && ClockCollapse.phase() == ClockCollapse.Phase.EXIT
+                && !ClockCollapse.exiting() && !ClockCollapse.aodHeld();
     }
 
     /**

@@ -61,6 +61,12 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private final Wash wash;
     /** Dozed under the OEM's big clock and not yet back to a settled lock screen; see doFrame. */
     private boolean afterBigClock;
+    /** 0..1, how far the square has grown out of RISE_FROM; 1 everywhere but the big clock. */
+    private float rise = 1f;
+    /** The size the square is uncovered at, under the big clock's retreating digits. */
+    private static final float RISE_FROM = 0.92f;
+    /** How far down the square the big clock has to reach for it to be fully covered. */
+    private static final float REVEAL_SPAN = 0.8f;
 
     private CoverCardLayer(Context context) {
         super(context);
@@ -463,6 +469,30 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private float drawX = Float.NaN, drawY, drawSide;
     /** The last place the lit lock screen gave it - what the doze keeps. */
     private CoverCardStyle.Rect lockPlace;
+    /**
+     * The place of the landed cover look, Phase.ON only - what the big clock's fall and wake
+     * keep. Not lockPlace: that one is still written while the clock grows into the doze.
+     */
+    private CoverCardStyle.Rect restPlace;
+
+    /**
+     * 0..1, how much of the square's place the big clock has left on its way up: 0 while the
+     * digits still reach REVEAL_SPAN of the way down it, 1 once they have cleared its top. The square is held
+     * at restPlace and grows and brightens with this, so it comes out from under the clock at
+     * the clock's own pace - no gap before it, and no place of its own that it has to jump from.
+     */
+    private float reveal() {
+        CoverCardStyle.Rect r = restPlace;
+        float clock = ClockCollapse.contentBottomOnScreen();
+        if (r == null || Float.isNaN(clock) || r.side <= 0f) return 0f;
+        int[] loc = tmpLoc;
+        getLocationOnScreen(loc);
+        // The big clock was measured reaching ~88% of the way down the square, not past it.
+        float span = r.side * REVEAL_SPAN;
+        float p = (r.y + span - (clock - loc[1])) / span;
+        p = Math.max(0f, Math.min(1f, p));
+        return p * p * (3f - 2f * p);
+    }
 
     /** The square's place from the live clock and media card, in this view's coordinates. */
     private CoverCardStyle.Rect placeNow() {
@@ -488,11 +518,15 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
     private boolean followPlace(ClockCollapse.Phase phase, float dt, float response,
                                 float target) {
         CoverCardStyle.Rect goal;
-        if (phase == ClockCollapse.Phase.AOD) {
+        if (afterBigClock && restPlace != null) {
+            // Placed live, the big clock's bottom pushes it small and low against the media card.
+            goal = restPlace;
+        } else if (phase == ClockCollapse.Phase.AOD) {
             goal = lockPlace != null ? lockPlace : placeNow();
         } else {
             goal = placeNow();
             if (goal != null) lockPlace = goal;
+            if (goal != null && phase == ClockCollapse.Phase.ON) restPlace = goal;
         }
         if (goal == null) return false;
         if (Float.isNaN(drawX) || opacity <= 0f) {
@@ -525,26 +559,44 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         boolean visible = style.mode == CoverCardStyle.CARD && Main.coverCardVisible();
         // 0.2.2 can keep lyrics in the full-screen AOD. The selected lyric page owns this space.
         boolean lyrics = LockLyrics.wantsAttached();
-        // A doze under the OEM's big clock hides the square, and the wake out of it keeps it hidden
-        // until the clock has collapsed: shown at once it sat full size across the big digits, then
-        // was squeezed small and low while the clock shrank, and only then grew back.
-        if (phase == ClockCollapse.Phase.AOD && !Main.screenOn() && !ClockCollapse.aodHeld()) {
+        // A doze under the OEM's big clock hides the square. Its wake holds the square at the
+        // place the landed lock screen gave it and lets the collapsing clock uncover it - see
+        // reveal(). Shown at once it sat full size across the big digits, and placed live it was
+        // squeezed small and low under the shrinking clock, then grew back.
+        //
+        // The fall counts, not only the doze: pressed again before the big clock has settled, the
+        // clock never reaches Phase.AOD - it goes EXIT (into the AOD) straight back to ENTER.
+        if (!ClockCollapse.aodHeld() && (phase == ClockCollapse.Phase.AOD
+                || (phase == ClockCollapse.Phase.EXIT && !ClockCollapse.exiting()))) {
             afterBigClock = true;
         } else if (phase == ClockCollapse.Phase.ON || phase == ClockCollapse.Phase.OFF) {
             afterBigClock = false;
         }
-        float target = visible && current != null && !afterBigClock
-                && (phase == ClockCollapse.Phase.EXIT ? exitWithCard : !lyrics)
-                ? (inAod ? 1f : Main.cardProgress()) : 0f;
+        boolean bigWake = afterBigClock && phase == ClockCollapse.Phase.ENTER;
+        // The other half: the clock growing into the big one covers the square as it comes down.
+        boolean bigFall = afterBigClock && phase == ClockCollapse.Phase.EXIT
+                && !ClockCollapse.exiting();
+        boolean underBig = bigWake || bigFall;
+        float target = visible && current != null && (!afterBigClock || underBig)
+                && (phase == ClockCollapse.Phase.EXIT && !bigFall ? exitWithCard : !lyrics)
+                ? (inAod ? 1f : underBig ? reveal() : Main.cardProgress()) : 0f;
         float response = Math.max(0.18f, Main.sClockResponse);
-        // Tied to the clock's own flight on the lit screen. Falling asleep it eases instead: into
-        // a doze with the OEM's big clock the square has to go, and snapped it vanished in a frame.
-        if ((inAod && lyrics) || (phase == ClockCollapse.Phase.ENTER && !afterBigClock)
+        // Tied to the clock's own flight on the lit screen, and to the big clock's edge on the way
+        // into and out of its doze. Otherwise falling asleep it eases.
+        if (bigFall) {
+            // A slow fade under it as well, for a big clock that stops short of covering it.
+            opacity = Math.min(target, opacity * (1f - Math.min(1f, dt / response)));
+        } else if ((inAod && lyrics) || phase == ClockCollapse.Phase.ENTER
                 || (phase == ClockCollapse.Phase.EXIT && Main.screenOn())) {
             opacity = target;
         } else {
             opacity += (target - opacity) * Math.min(1f, dt * 3f / response);
         }
+        // Grows with the reveal on the way up, and shrinks under the digits on the way down.
+        if (afterBigClock) rise = underBig ? target : Math.min(rise, opacity);
+        else if (opacity <= 0f) rise = 1f;
+        else rise += (1f - rise) * Math.min(1f, dt * 3f / response);
+        if (rise > 0.998f) rise = 1f;
         if (Math.abs(opacity - target) < 0.002f) opacity = target;
         float scaleTarget = playing ? CardSpring.PLAYING : CardSpring.PAUSED;
         if (phase == ClockCollapse.Phase.AOD) scale.snap(scaleTarget);
@@ -565,7 +617,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         if (visibility == VISIBLE) invalidate();
         boolean settling = Math.abs(target - opacity) > 0.001f
                 || (phase != ClockCollapse.Phase.AOD && !scale.atRest(scaleTarget))
-                || previous != null || placing
+                || previous != null || placing || (rise < 1f && opacity > 0f)
                 // Still waking from the big clock: keep looking until the clock has landed.
                 || (afterBigClock && phase != ClockCollapse.Phase.AOD);
         if (settling) {
@@ -590,7 +642,7 @@ final class CoverCardLayer extends View implements Choreographer.FrameCallback {
         float density = getResources().getDisplayMetrics().density;
         if (Float.isNaN(drawX)) return;
         CoverMorphMotion.Box actual = CoverMorphMotion.cardSquare(drawX, drawY,
-                drawSide, scale.value);
+                drawSide, scale.value * (RISE_FROM + (1f - RISE_FROM) * rise));
         float scaled = actual.w;
         square.set(actual.x, actual.y, actual.x + actual.w, actual.y + actual.h);
         float radius = Math.min(20f * density, scaled * 0.10f);
